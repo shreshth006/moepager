@@ -126,28 +126,34 @@ Real prose trace (255 tokens, 0.488 GB of experts touched per token),
 replayed with mmap and 4 threads under a cgroup wall with swap off
 (`bench/results/phase7-olmoe/B-*`).
 
-| model | budget | variant | tok/s | SSD GB/token | majflt/token |
+| model | budget | variant | tok/s | read GB/token (cgroup, incl. daemon) | majflt/token |
 |---|---|---|---|---|---|
 | OLMoE-1B-7B Q4_K_M | 1.5 GB | kernel default | 0.79 | 1.80 | 956 |
 | OLMoE-1B-7B Q4_K_M | 1.5 GB | read-around off | 0.75 | 0.16 | 38,802 |
-| OLMoE-1B-7B Q4_K_M | 1.5 GB | moepagerd (read-around on) | 0.66 | 1.61 | 881 |
-| OLMoE-1B-7B Q4_K_M | 1.5 GB | read-around off + moepagerd | 2.58 | 0.05 | 12,342 |
+| OLMoE-1B-7B Q4_K_M | 1.5 GB | moepagerd (read-around on) | 0.66 | 2.23 | 881 |
+| OLMoE-1B-7B Q4_K_M | 1.5 GB | read-around off + moepagerd | 2.58 | 0.15 | 12,342 |
 | OLMoE-1B-7B Q4_K_M | 2.5 GB | kernel default | 3.25 | 0.37 | 338 |
 | OLMoE-1B-7B Q4_K_M | 2.5 GB | read-around off | 5.81 | 0.02 | 5,704 |
-| OLMoE-1B-7B Q4_K_M | 2.5 GB | moepagerd (read-around on) | 2.82 | 0.36 | 321 |
-| OLMoE-1B-7B Q4_K_M | 2.5 GB | read-around off + moepagerd | 2.48 | 0.05 | 12,641 |
+| OLMoE-1B-7B Q4_K_M | 2.5 GB | moepagerd (read-around on) | 2.82 | 0.49 | 321 |
+| OLMoE-1B-7B Q4_K_M | 2.5 GB | read-around off + moepagerd | 2.48 | 0.15 | 12,641 |
 
 | gpt-oss-20b MXFP4 | 4 GB | kernel default | 1.05 | 1.33 | 708 |
 | gpt-oss-20b MXFP4 | 4 GB | read-around off | 0.49 | 0.30 | 73,595 |
-| gpt-oss-20b MXFP4 | 4 GB | moepagerd (read-around on) | 1.11 | 0.73 | 515 |
-| gpt-oss-20b MXFP4 | 4 GB | read-around off + moepagerd | 1.64 | 0.07 | 16,151 |
+| gpt-oss-20b MXFP4 | 4 GB | moepagerd (read-around on) | 1.11 | 1.12 | 515 |
+| gpt-oss-20b MXFP4 | 4 GB | read-around off + moepagerd | 1.64 | 0.31 | 16,151 |
 | gpt-oss-20b MXFP4 | 6 GB | kernel default | 2.68 | 0.36 | 310 |
 | gpt-oss-20b MXFP4 | 6 GB | read-around off | 1.24 | 0.12 | 28,529 |
-| gpt-oss-20b MXFP4 | 6 GB | moepagerd (read-around on) | 3.27 | 0.25 | 247 |
-| gpt-oss-20b MXFP4 | 6 GB | read-around off + moepagerd | 5.47 | 0.02 | 5,952 |
+| gpt-oss-20b MXFP4 | 6 GB | moepagerd (read-around on) | 3.27 | 0.36 | 247 |
+| gpt-oss-20b MXFP4 | 6 GB | read-around off + moepagerd | 5.47 | 0.11 | 5,952 |
 
 (gpt-oss rows: prose trace of 127 tokens, 1.272 GB of experts touched per
 token, `bench/results/phase7-gptoss/B-*`.)
+
+Read GB/token is the page-cache inflow charged to the cgroup
+(`pgsteal` × 4 KiB + `file` at exit, from `memory.stat`), so it includes
+moepagerd's WILLNEED reads. The replayer's own `/proc/self/io` misses
+those; it agrees with the cgroup figure on every daemon-free run but
+understated the daemon rows in an earlier version of this table.
 
 Simulator LRU at 1.5 GB (≈ 37 % of expert bytes) predicts ≈ 0.14 GB/token,
 which matches the read-around-off kernel run (0.16). With read-around on,

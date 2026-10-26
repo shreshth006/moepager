@@ -100,6 +100,20 @@ def bandwidth(res: Path, out: Path) -> None:
     plt.close(fig)
 
 
+def cgroup_read_gb(run: Path, tokens: int) -> float | None:
+    """Page-cache inflow per token charged to the run's cgroup, in GB.
+
+    Reclaimed pages (pgsteal) plus file pages still charged at exit. Unlike
+    the replayer's own /proc/self/io, this includes reads issued by
+    moepagerd's WILLNEED; on daemon-free runs the two agree.
+    """
+    f = run / "memory.stat"
+    if not f.exists():
+        return None
+    st = dict(line.split() for line in f.read_text().splitlines())
+    return (int(st["pgsteal"]) * 4096 + int(st["file"])) / tokens / 1e9
+
+
 def replay(
     res: Path, out: Path, model: str = "OLMoE", need: str = "0.49", name: str = "fig-replay.png"
 ) -> None:
@@ -118,7 +132,10 @@ def replay(
             if f.exists():
                 t = f.read_text()
                 tps = float(re.search(r"tok/s=([\d.]+)", t).group(1))
-                ssd = float(re.search(r"storage_read/token=([\d.]+)GB", t).group(1))
+                tokens = int(re.search(r"tokens=(\d+)", t).group(1))
+                ssd = cgroup_read_gb(f.parent, tokens)
+                if ssd is None:
+                    ssd = float(re.search(r"storage_read/token=([\d.]+)GB", t).group(1))
                 data[(bud, v)] = (tps, ssd)
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.6))
     w = 0.8 / len(variants)
@@ -130,7 +147,7 @@ def replay(
             label_bars(ax, bars, fmt)
     for ax, t, yl in (
         (axes[0], "Replay speed (higher is better)", "tokens/s"),
-        (axes[1], "SSD traffic (lower is better)", "GB read per token"),
+        (axes[1], "Data read, incl. daemon (lower is better)", "GB read per token"),
     ):
         ax.set_xticks(range(len(budgets)), [f"memory.max = {b}" for b in budgets])
         style(ax, yl)
