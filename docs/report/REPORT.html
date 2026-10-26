@@ -11,7 +11,7 @@ th, td { border: 1px solid #c9c8c3; padding: 3px 6px; vertical-align: top; }
 th { background: #eef3fb; }
 img { max-width: 100%; display: block; margin: 8px auto; page-break-inside: avoid; }
 code { font-family: 'Liberation Mono', monospace; font-size: 9pt; background: #f3f2ef; padding: 0 2px; }
-pre { background: #f3f2ef; padding: 6px; font-size: 8.5pt; overflow-x: auto; }
+pre { background: #f3f2ef; padding: 6px; font-size: 8.2pt; white-space: pre-wrap; page-break-inside: avoid; }
 em { color: #444; }
 </style></head><body><h1>moepager</h1>
 <h2>Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines</h2>
@@ -28,28 +28,32 @@ gpt-oss-20b, 8 of 128 in Qwen3-30B-A3B. That makes them attractive for
 consumer machines, which run them with llama.cpp in <code>mmap</code> mode when the
 model is larger than free RAM, leaving the Linux page cache to decide
 which weights stay in memory.</p>
-<p>We show that the kernel's generic behaviour fits this workload poorly:
-- <strong>Scattered units.</strong> One expert's weights are three slices in three
-    tensors hundreds of megabytes apart.
-- <strong>Read-around pollution.</strong> On a page fault, the kernel reads a window
+<p>We show that the kernel's generic behaviour fits this workload poorly:</p>
+<ul>
+<li><strong>Scattered units.</strong> One expert's weights are three slices in three
+    tensors hundreds of megabytes apart.</li>
+<li><strong>Read-around pollution.</strong> On a page fault, the kernel reads a window
     around the faulting page: 4 MiB on our test machine's btrfs. That pulls
     unused neighbouring experts into the cache and multiplies SSD traffic
-    3.7–4.8×.
-- <strong>Repacking.</strong> llama.cpp's default CPU weight repacking moves 77–100 % of
-    expert bytes into anonymous memory, outside the page cache.</p>
+    3.7–4.8×.</li>
+<li><strong>Repacking.</strong> llama.cpp's default CPU weight repacking moves 77–100 % of
+    expert bytes into anonymous memory, outside the page cache.</li>
+</ul>
 <p>We present <strong>moepager</strong>, a Rust toolchain and an unprivileged user-space
 daemon that manage the shared page cache at the granularity of
 (layer, expert) units, without changing the inference engine's code or
-binary:
-1. It parses the GGUF header into an exact expert map.
-2. It observes expert misses black-box by polling sentinel pages with
-      <code>mincore()</code>.
-3. It answers each miss with <strong>expert-completion readahead</strong>: bulk
+binary:</p>
+<ol>
+<li>It parses the GGUF header into an exact expert map.</li>
+<li>It observes expert misses black-box by polling sentinel pages with
+      <code>mincore()</code>.</li>
+<li>It answers each miss with <strong>expert-completion readahead</strong>: bulk
       <code>posix_fadvise(WILLNEED)</code> of the expert's remaining slices in 128 KiB
       chunks. The chunking is necessary because the kernel silently truncates
-      larger requests.
-4. A 64-line <code>LD_PRELOAD</code> shim turns off fault read-around on the model
-      mapping, which no stock llama.cpp option does on single-node machines.</p>
+      larger requests.</li>
+<li>A 64-line <code>LD_PRELOAD</code> shim turns off fault read-around on the model
+      mapping, which no stock llama.cpp option does on single-node machines.</li>
+</ol>
 <p>The evaluation toolchain records ground-truth routing from llama.cpp,
 computes exact LRU miss-ratio curves, simulates policies against a Belady
 optimum, and runs llama.cpp under cgroup memory limits.</p>
@@ -61,53 +65,399 @@ traffic</strong> and memory-pressure stall reduced from 12.7 % to 1.0 %. Default
 llama.cpp, by contrast, was OOM-killed at both limits unless allowed to
 spill 2.3–2.5 GB into compressed RAM swap. On a second model, gpt-oss-20b
 (12.1 GB), replaying real routing under 4 GB and 6 GB limits showed the
-same pattern: 1.6–2.0× faster than the kernel default, with 15–20× less
-SSD traffic.</p>
+same pattern: 1.6–2.0× faster than the kernel default, with 3–4× less
+data read.</p>
 <p>We also report what did not work: a value-based pinning policy captured
 little of the optimal policy's 34–74 % miss reduction, and completion
 readahead without turning off read-around made performance worse.</p>
 <h2>1.2 System architecture</h2>
+<p>moepager is a <strong>user-space control loop around the Linux page cache</strong>. It
+sits beside an unmodified inference engine, observes the engine only
+through the page cache they share, and acts only through standard kernel
+interfaces. Figure 1 shows the whole system; the subsections below define
+its structure, components, interfaces, data model, runtime behaviour,
+process and privilege model, and the design decisions behind them.</p>
 <p><img alt="moepager architecture" src="architecture-portrait.png" /></p>
 <p><em>Figure 1. moepager architecture (source: <code>docs/report/architecture-portrait.dot</code>; a landscape version is <code>architecture.png</code>).</em></p>
+<h3>1.2.1 Architectural style</h3>
 <ul>
-<li><strong>Offline, once per model:</strong> <code>mp-gguf</code> reads only the GGUF header and
-    builds the expert map: each (layer, expert) unit's three slice offsets
-    and sentinel pages.</li>
-<li><strong>Runtime:</strong><ul>
-<li>The unmodified engine runs with <code>--no-repack</code> (so weights stay in the
-    page cache) and with the <code>LD_PRELOAD</code> shim, which turns off read-around
-    on the model mapping.</li>
-<li>Its page faults bring expert slices into the shared page cache.</li>
-<li><code>moepagerd</code> polls sentinel pages, so it sees misses only. It updates
-    <code>mp-core</code> statistics and issues page-cache hints through <code>mp-os</code>:<ul>
-<li>chunked WILLNEED for completion readahead (no privilege needed);</li>
-<li>optional <code>mlock</code> pinning (<code>CAP_IPC_LOCK</code>);</li>
-<li>optional <code>MADV_COLD</code> demotion (<code>CAP_SYS_NICE</code>).</li>
+<li><strong>Layered, with ports and adapters.</strong> Policy code is pure: it consumes
+    observations and emits <code>Action</code> values, and never calls the kernel. All
+    operating-system effects sit behind two traits (<code>PageCacheOps</code>,
+    <code>ResidencyProbe</code>), with a Linux implementation and a mock one. This lets
+    the same policy run in the simulator, in tests and in the daemon.</li>
+<li><strong>One core, two hosts.</strong> The policy crate <code>mp-core</code> is linked both into
+    the trace-driven simulator (<code>mp-sim</code>) and into the live daemon
+    (<code>moepagerd</code>), so a policy evaluated offline is exactly the policy
+    deployed (ADR 0001).</li>
+<li><strong>Three planes.</strong><ul>
+<li>An <strong>offline plane</strong> runs once per model file: it parses the header
+    and builds the expert map.</li>
+<li>An <strong>online plane</strong> is the observe → decide → act loop of the daemon.</li>
+<li>An <strong>evaluation plane</strong> records ground truth, simulates policies
+    against an optimal bound, and benchmarks under memory limits.</li>
 </ul>
 </li>
-<li>No weights are copied: engine and daemon share the same page-cache
-    pages.</li>
-<li>Both run inside one cgroup v2 scope with a <code>memory.max</code> budget, so
-    every page is charged to the same budget.</li>
+<li><strong>Non-invasive.</strong> Nothing in the engine's source or binary is changed.
+    The only intervention in the engine's process is an optional
+    <code>LD_PRELOAD</code> shim that adds one <code>madvise</code> call after <code>mmap</code>.</li>
 </ul>
-</li>
-<li><strong>Evaluation:</strong><ul>
-<li><code>moe_trace</code>, an experiment-only llama.cpp eval callback, records
-    ground-truth routing.</li>
-<li><code>mp-analyze</code> and <code>mp-sim</code> evaluate policies against Belady*, using
-    the same <code>mp-core</code> code as the daemon.</li>
-<li><code>bench/</code> runs real-kernel replays, the bandwidth microbenchmark and
-    llama-bench under memory limits.</li>
+<p>The crate layers, from Cargo dependencies (each layer uses only layers
+below it):</p>
+<pre><code> L4  Front ends     moepager (CLI: gguf-map, synth, analyze, sim, record, replay, fault-io, …)
+                    moepagerd (daemon)
+ L3  Evaluation     mp-sim (simulator)   mp-analyze (reuse, MRC)   mp-synth (synthetic traces)
+ L2  Policy core    mp-core: OnlineStats, CostModel, ResidencyEngine, Prefetcher -&gt; Action
+ L1  Adapters       mp-gguf (file format)   mp-recorder (observation)   mp-os (kernel calls)
+ L0  Data           mp-trace (.mpt trace format, ExpertEvent)
+ ----------------------------------------------------------------------------------------
+     Linux 6.x: page cache, mincore, posix_fadvise, madvise, mlock, process_madvise,
+                cgroup v2, PSI
+</code></pre>
+<h3>1.2.2 Components and responsibilities</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Language / size</th>
+<th>Responsibility</th>
+<th>Needs privilege</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mp-gguf</code></td>
+<td>Rust</td>
+<td>Parse the GGUF header; build the expert map (units, slices, sentinels, page→unit index); report which tensors llama.cpp would repack</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>mp-trace</code></td>
+<td>Rust</td>
+<td><code>.mpt</code> binary trace format; CSV import; token inference from layer order</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>mp-os</code></td>
+<td>Rust</td>
+<td>Kernel interfaces: <code>mincore</code>, <code>cachestat</code>, chunked <code>WILLNEED</code>, <code>MADV_POPULATE_READ</code> worker, <code>mlock</code>, <code>process_madvise</code>; <code>/proc</code> parsing (maps, smaps VmFlags, cgroup)</td>
+<td>only for pin / demote</td>
+</tr>
+<tr>
+<td><code>mp-recorder</code></td>
+<td>Rust</td>
+<td>Observation: sentinel polling, full residency scans, bpftrace event conversion, trace replay on a real file</td>
+<td>bpftrace only</td>
+</tr>
+<tr>
+<td><code>mp-core</code></td>
+<td>Rust</td>
+<td>Online statistics (decayed miss rates, layer transitions), cost model, V(e) residency planner, completion and predictive prefetch → <code>Action</code>s</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>mp-sim</code></td>
+<td>Rust</td>
+<td>Byte-capacity cache simulator with an I/O channel; evictors LRU, LFU, Belady*; controllers wrapping <code>mp-core</code></td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>mp-analyze</code></td>
+<td>Rust</td>
+<td>Reuse distances (Fenwick tree), exact LRU miss-ratio curve, locality statistics</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>moepagerd</code></td>
+<td>Rust</td>
+<td>The daemon: event source → <code>mp-core</code> → <code>PageCacheOps</code>; start-up checks (read-around, cgroup, memlock limit)</td>
+<td>optional</td>
+</tr>
+<tr>
+<td><code>moepager</code></td>
+<td>Rust</td>
+<td>CLI front end for all offline and evaluation tasks</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>libmoepager_preload.so</code></td>
+<td>C, 64 lines</td>
+<td><code>LD_PRELOAD</code> shim: <code>MADV_RANDOM</code> on read-only shared <code>*.gguf</code> mappings</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>moe_trace</code></td>
+<td>C++, 169 lines</td>
+<td><em>Experiment only</em>: records ground-truth routing from llama.cpp's eval callback</td>
+<td>no</td>
+</tr>
+<tr>
+<td><code>bench/</code></td>
+<td>Bash</td>
+<td>Experiments A–D under cgroup v2 memory walls; metric snapshots</td>
+<td>no (user systemd scope)</td>
+</tr>
+<tr>
+<td><code>python/moepager_tools</code></td>
+<td>Python</td>
+<td>Result collection, report figures</td>
+<td>no</td>
+</tr>
+<tr>
+<td>llama.cpp [1]</td>
+<td>external, unmodified</td>
+<td>The inference engine; maps the model with <code>mmap</code></td>
+<td>no</td>
+</tr>
+</tbody>
+</table>
+<h3>1.2.3 Interfaces</h3>
+<p>The boundaries between layers are four Rust traits and one value type:</p>
+<pre><code class="language-rust">/// mp-os: actuators on byte ranges of the model file (LinuxOps, MockOps).
+pub trait PageCacheOps {
+    fn prefetch(&amp;mut self, offset: u64, len: u64) -&gt; io::Result&lt;()&gt;; // async readahead
+    fn pin(&amp;mut self, offset: u64, len: u64) -&gt; io::Result&lt;()&gt;;      // resident + unevictable
+    fn unpin(&amp;mut self, offset: u64, len: u64) -&gt; io::Result&lt;()&gt;;
+    fn demote(&amp;mut self, offset: u64, len: u64) -&gt; io::Result&lt;()&gt;;   // evict first
+}
+
+/// mp-os: residency queries (MappedFile via mincore, MockOps).
+pub trait ResidencyProbe {
+    fn resident(&amp;self, first: u64, n: u64, out: &amp;mut Vec&lt;bool&gt;) -&gt; io::Result&lt;()&gt;;
+    fn page_size(&amp;self) -&gt; u64;
+}
+
+/// moepagerd: where observations come from (SentinelSource, TraceSource).
+pub trait EventSource {
+    fn poll(&amp;mut self) -&gt; io::Result&lt;Option&lt;Vec&lt;ExpertEvent&gt;&gt;&gt;;
+}
+
+/// mp-core -&gt; OS layer or simulated cache; units are dense ids l*E + e.
+pub enum Action { Pin(u32), Unpin(u32), Prefetch(u32), Demote(u32) }
+
+/// mp-sim: policy hooks driven by the simulator (StaticPin, VControl, ...).
+pub trait Controller {
+    fn on_access(&amp;mut self, layer: u16, expert: u16, unit: u32, hit: bool, t_ns: u64);
+    fn after_layer(&amp;mut self, layer: u16, view: &amp;View) -&gt; Vec&lt;Action&gt;;
+    fn end_token(&amp;mut self, view: &amp;View) -&gt; Vec&lt;Action&gt;;
+}
+</code></pre>
+<ul>
+<li>The daemon is generic over <code>PageCacheOps</code> (<code>Daemon&lt;O: PageCacheOps&gt;</code>);
+    <code>--ops mock</code> only logs actions, <code>--ops linux</code> executes them.</li>
+<li>An <code>Action</code> names a <em>unit</em>; the daemon expands it into the unit's slice
+    byte ranges using the expert map, so policy code never sees offsets.</li>
+<li>In the simulator, controllers that model black-box observation must
+    drop the <code>hit = true</code> calls themselves, which is how the miss-only
+    regime is evaluated.</li>
+<li>External interfaces: the GGUF file format [2]; the kernel system
+    calls and <code>/proc</code> files listed under <code>mp-os</code> [3]; cgroup v2
+    control files [4]; the <code>.mpt</code> trace format
+    (<code>docs/TRACE_FORMAT.md</code>); the expert map as JSON (<code>map.json</code>).</li>
 </ul>
-</li>
+<h3>1.2.4 Data model</h3>
+<table>
+<thead>
+<tr>
+<th>Entity</th>
+<th>Fields</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ExpertMap</code></td>
+<td>arch, page size, data offset, file size, <code>n_layers</code> L, <code>n_experts</code> E, top-k, <code>units</code>, <code>dense</code>, warnings</td>
+<td>built once per file; serialisable as JSON</td>
+</tr>
+<tr>
+<td><code>Unit</code></td>
+<td>layer l, expert e, bytes s_u, <code>slices</code></td>
+<td>dense id u = l·E + e; 1,024 units for OLMoE, 6,144 for Qwen3-30B-A3B</td>
+</tr>
+<tr>
+<td><code>Slice</code></td>
+<td>kind (<code>up</code>, <code>gate</code>, <code>down</code>, <code>gate_up</code>, <code>*_bias</code>), tensor name, absolute offset, length</td>
+<td>32-byte aligned, so a page may belong to two units</td>
+</tr>
+<tr>
+<td><code>DenseRegion</code></td>
+<td>name, layer, offset, length</td>
+<td>attention, norms, embeddings: everything that is not an expert</td>
+</tr>
+<tr>
+<td>Sentinel</td>
+<td>page index, (l, e), reliable flag</td>
+<td>middle page of a weight slice, ≥ 128 KiB from its edges</td>
+</tr>
+<tr>
+<td><code>PageIndex</code></td>
+<td>sorted intervals + prefix-max of ends</td>
+<td>page → <code>Owner::Expert{unit, slice}</code> or <code>Owner::Dense{region}</code></td>
+</tr>
+<tr>
+<td><code>ExpertEvent</code></td>
+<td><code>t_ns</code> u64, <code>token</code> u32, <code>layer</code> u16, <code>expert</code> u16</td>
+<td>16-byte <code>.mpt</code> record; "used" (full) or "missed" (miss-only)</td>
+</tr>
+<tr>
+<td><code>.mpt</code> file</td>
+<td>magic <code>MPTRACE\0</code>, version, record kind, JSON header (model, observation regime, units), fixed-size records</td>
+<td>expert records (16 B) or page records (24 B)</td>
+</tr>
+<tr>
+<td><code>OnlineStats</code></td>
+<td>decayed counts and exposures per unit, layer-transition rows, layer time</td>
+<td>the daemon's only state besides the pinned set</td>
+</tr>
+</tbody>
+</table>
+<h3>1.2.5 Runtime data flow</h3>
+<p>For each decoded token, with the recommended configuration (engine with
+<code>-nr</code> and the shim; daemon with <code>--policy v --budget-mb 0</code>):</p>
+<ol>
+<li>The engine computes layer l and reads the k experts the router chose.
+      Pages of the chosen units that are not resident cause page faults.
+      Because of <code>MADV_RANDOM</code>, each fault reads only the faulting page.</li>
+<li>The faulted page is inserted into the shared page cache. If it is a
+      sentinel, the unit's sentinel flips from non-resident to resident.</li>
+<li>Within one poll period (300 µs in the experiments), <code>SentinelSource</code>
+      reports the flip as an <code>ExpertEvent</code> for (l, e).</li>
+<li><code>moepagerd</code> updates <code>OnlineStats</code> and infers token boundaries from the
+      layer order.</li>
+<li>The prefetcher returns <code>Action::Prefetch(u)</code>. <code>LinuxOps</code> issues
+      <code>posix_fadvise(WILLNEED)</code> for every slice of u in 128 KiB chunks, and
+      the kernel starts large asynchronous reads.</li>
+<li>The engine's remaining faults on u are satisfied by pages that are
+      already resident or already under I/O. They wait on the in-flight read
+      instead of issuing their own small reads.</li>
+<li>If a pin budget is set, every 4 tokens the residency planner may emit <code>Pin</code> / <code>Unpin</code> / <code>Demote</code> actions,
+      which become <code>mlock</code> / <code>munlock</code> / <code>process_madvise(MADV_COLD)</code>.</li>
+<li>Under the cgroup's <code>memory.max</code>, the kernel's reclaim (MGLRU [5])
+      evicts unpinned pages as usual; the daemon never evicts by itself
+      unless demotion is enabled.</li>
+</ol>
+<p>Offline, <code>mp-gguf</code> produces the map used in steps 2–5. For evaluation,
+<code>moe_trace</code> replaces steps 2–3 with exact router output, and <code>mp-sim</code>
+replaces steps 1, 6 and 8 with a model of the cache and the I/O device.</p>
+<h3>1.2.6 Process, privilege and memory view</h3>
+<table>
+<thead>
+<tr>
+<th>Process</th>
+<th>Runs</th>
+<th>Maps the model</th>
+<th>Privilege</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Engine (<code>llama-cli</code>, <code>llama-bench</code>, …)</td>
+<td>unmodified binary, optionally <code>LD_PRELOAD</code> shim</td>
+<td><code>MAP_SHARED</code>, <code>PROT_READ</code>, whole file</td>
+<td>none</td>
+</tr>
+<tr>
+<td><code>moepagerd</code></td>
+<td>separate process, same user</td>
+<td><code>MAP_SHARED</code>, <code>PROT_READ</code>, whole file (for <code>mincore</code> and <code>mlock</code>)</td>
+<td>none for observation and prefetch; <code>CAP_IPC_LOCK</code> for pinning; <code>CAP_SYS_NICE</code> for demotion of the engine's pages</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>No copies.</strong> Both processes map the same file, so they share the same
+    page-cache folios. A page the daemon prefetches or pins is the page the
+    engine reads.</li>
+<li><strong>One memory budget.</strong> Both run in one cgroup v2 scope with a
+    <code>memory.max</code> limit [4]. Page-cache pages are charged to the
+    cgroup of the task that brought them in, so co-location makes the
+    daemon's prefetches count against the same budget as the engine's
+    faults (ADR 0008). The daemon warns when it is not in the engine's
+    cgroup.</li>
+<li><strong>Start-up checks</strong> (<code>--pid</code>): the engine's mapping must carry the <code>rr</code>
+    (random-read) VmFlag in <code>/proc/&lt;pid&gt;/smaps</code>, otherwise read-around is
+    still on; the memlock limit is compared with the pin budget.</li>
+<li><strong>Failure isolation.</strong> If the daemon stops, the engine continues with
+    plain kernel behaviour; every action is a hint, and pins are released
+    when the daemon's mapping is closed.</li>
 </ul>
+<h3>1.2.7 Key design decisions</h3>
+<table>
+<thead>
+<tr>
+<th>ADR</th>
+<th>Decision</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0001</td>
+<td>Policy core in Rust, shared by simulator and daemon</td>
+<td>what is simulated is what runs</td>
+</tr>
+<tr>
+<td>0002</td>
+<td>Treat black-box observation as miss-only</td>
+<td>hits are served by the MMU and are invisible to user space</td>
+</tr>
+<tr>
+<td>0003</td>
+<td>Residency via <code>mlock</code> pin + <code>MADV_COLD</code> demote, not <code>fadvise(DONTNEED)</code></td>
+<td><code>DONTNEED</code> does not drop pages another process maps</td>
+</tr>
+<tr>
+<td>0004</td>
+<td>Measure (go/no-go, kill criteria) before building the live daemon</td>
+<td>avoid optimising a cost that does not exist</td>
+</tr>
+<tr>
+<td>0005</td>
+<td>128 KiB guard distance for sentinel pages</td>
+<td>a neighbour's read-around must not trigger a sentinel</td>
+</tr>
+<tr>
+<td>0006</td>
+<td>Chunk <code>WILLNEED</code> into 128 KiB requests</td>
+<td>the kernel silently truncates larger requests</td>
+</tr>
+<tr>
+<td>0007</td>
+<td>Require <code>--no-repack</code> / <code>-nr</code> for llama.cpp</td>
+<td>repacked weights live in anonymous memory, outside the page cache</td>
+</tr>
+<tr>
+<td>0008</td>
+<td>Run daemon and engine in one cgroup</td>
+<td>fair accounting of prefetched pages</td>
+</tr>
+<tr>
+<td>0009</td>
+<td>Two-tier observation: unprivileged sentinels, optional bpftrace</td>
+<td>works without root; exact events when root is available</td>
+</tr>
+<tr>
+<td>0010</td>
+<td>Token boundaries from layer regression with a slack</td>
+<td>the engine exposes no token signal</td>
+</tr>
+<tr>
+<td>0011</td>
+<td>Optional <code>LD_PRELOAD</code> shim to turn off read-around</td>
+<td>no stock llama.cpp option does it on single-node machines</td>
+</tr>
+</tbody>
+</table>
 <h1>2. Introduction and Problem Statement</h1>
 <h2>2.1 Background</h2>
-<p>Mixture-of-Experts (MoE) language models replace each dense feed-forward
-block with many smaller "expert" networks plus a router. For every token,
+<p>Mixture-of-Experts (MoE) language models [6, 7] replace each
+dense feed-forward block with many smaller "expert" networks plus a
+router. For every token,
 the router picks a few experts per layer (top-k), so only a small fraction
-of the parameters is used per token. In the three models studied here
-(values read from the real model file headers):</p>
+of the parameters is used per token. In the three models studied here,
+OLMoE [8], gpt-oss [9] and Qwen3 [10] (values read from
+the real model file headers [11]):</p>
 <table>
 <thead>
 <tr>
@@ -148,12 +498,13 @@ of the parameters is used per token. In the three models studied here
 </table>
 <p>Because only 4–8 experts per layer are touched per token, MoE models are an
 attractive fit for consumer machines. A common way to run a model larger
-than free RAM is llama.cpp in <code>mmap</code> mode: the model file is mapped into
+than free RAM is llama.cpp [1] in <code>mmap</code> mode: the model file is mapped into
 memory, and the Linux page cache loads weights on demand and evicts them
 under memory pressure.</p>
 <h2>2.2 Problem statement</h2>
-<p>The kernel's page cache is generic. Its reclaim policy (MGLRU) and its
-fault read-around know nothing about how a GGUF file is laid out or how MoE
+<p>The kernel's page cache is generic. Its reclaim policy (MGLRU [5])
+and its fault read-around [12] know nothing about how a GGUF file
+[2] is laid out or how MoE
 routing behaves. Our measurements on a 15 GB laptop (Section 6) show three
 concrete problems:</p>
 <ol>
@@ -185,34 +536,42 @@ weights.</p>
 <h2>3.1 Related work</h2>
 <p><strong>MoE offloading inside the inference engine.</strong> Most systems that keep
 only part of an MoE model in fast memory are built into the engine, where
-the router's decisions are directly visible:
-- mixtral-offloading (Eliseev &amp; Mazur, 2023): LRU expert cache plus
-    speculative prefetch.
-- MoE-Infinity (Xue et al., 2024): activation-aware expert cache.
-- HOBBIT (2024): mixed-precision experts, implemented as about 8,000 lines
-    added to llama.cpp.
-- Pre-gated MoE, ProMoE, DuoServe-MoE, Fate and similar: predict
-    next-layer experts and prefetch them.</p>
-<p>Inside llama.cpp itself there are several open proposals: PR #25294
-(O_DIRECT expert streaming that bypasses the page cache), PR #26824 (expert
-heat map and mmap pinning), PR #29887, issue #20757 and discussion #27149.
-All of these modify the engine.</p>
-<p><strong>Using the OS page cache as the expert tier.</strong> Si et al. (arXiv
-2608.12103, 2026) is the closest study. On a datacenter GH200 node they
+the router's decisions are directly visible:</p>
+<ul>
+<li>mixtral-offloading (Eliseev and Mazur [13]): LRU expert cache
+    plus speculative prefetch.</li>
+<li>MoE-Infinity (Xue et al. [14]): activation-aware expert cache.</li>
+<li>HOBBIT (Tang et al. [15]): mixed-precision experts, implemented as
+    about 8,000 lines added to llama.cpp.</li>
+<li>Pre-gated MoE [16], DuoServe-MoE [17] and similar
+    systems: predict next-layer experts and prefetch them. Liu et al.
+    [18] survey this design space.</li>
+</ul>
+<p>Inside llama.cpp itself there are several open proposals [19]:
+PR #25294 (O_DIRECT expert streaming that bypasses the page cache),
+PR #26824 (expert heat map and mmap pinning), PR #29887, issue #20757 and
+discussion #27149. All of these modify the engine.</p>
+<p><strong>Using the OS page cache as the expert tier.</strong> Si et al. [20] is
+the closest study. On a datacenter GH200 node they
 show that kernel recency (LRU) serves about as much demand as an oracle
-static-frequency pin, that Belady's bound leaves about one third of LRU's
+static-frequency pin, that Belady's bound [21] leaves about one third of LRU's
 misses addressable, and that <code>fadvise(WILLNEED)</code> prefetch hints gained only
 0.3–5 %. Their engine reads with <code>pread</code>, so mmap fault behaviour and file
 structure play no role.</p>
-<p><strong>Operating-system mechanisms.</strong>
-- cache_ext / cachebpf (Zussman et al., 2025) lets eBPF programs replace
-    page-cache eviction, but needs a patched kernel.
-- MGLRU and DAMON are generic and know nothing of model structure.
-- vmtouch pins or evicts file ranges given by the user.
-- "LLM in a flash" (Alizadeh et al., Apple, 2024) and PowerInfer-2 bundle
-    co-used weights to make flash reads large. That is the same idea as our
-    expert-completion readahead, but those systems implement it inside the
-    engine and require reformatting the model.</p>
+<p><strong>Operating-system mechanisms.</strong></p>
+<ul>
+<li>cache_ext / cachebpf (Zussman et al. [22]) lets eBPF programs
+    replace page-cache eviction, but needs a patched kernel.</li>
+<li>MGLRU [5] and DAMON [23] are generic and know nothing of model
+    structure.</li>
+<li>vmtouch [24] pins or evicts file ranges given by the user.</li>
+<li>"LLM in a flash" (Alizadeh et al. [25]) bundles co-used
+    weights so that flash reads are large. That is the same idea as our
+    expert-completion readahead, but it is implemented inside the engine and
+    requires reformatting the model. PowerInfer [26] similarly
+    exploits activation locality inside the engine, keeping frequently
+    activated ("hot") neurons in fast memory.</li>
+</ul>
 <p><strong>Gap.</strong> We found no system that manages the page cache for an
 <em>unmodified</em> engine using the <em>model file's structure</em>, and none that
 measures the effect of mmap fault read-around on MoE experts.</p>
@@ -231,122 +590,515 @@ measures the effect of mmap fault read-around on MoE experts.</p>
     and report only measured numbers.</li>
 </ul>
 <h1>4. Methodology and Algorithms</h1>
-<h2>4.1 Expert map (from the GGUF header)</h2>
-<p>A GGUF file starts with a header listing every tensor's name, shape, type
-and offset. <code>mp-gguf</code> parses only this header, so a truncated prefix of a
-file works too. For each tensor named <code>blk.&lt;L&gt;.&lt;ffn_up|ffn_gate|ffn_down|ffn_gate_up&gt;_exps.weight</code>
-with shape <code>[ne0, ne1, n_expert]</code>:</p>
-<ul>
-<li><code>bytes = type_size × ne0·ne1·n_expert / block_size</code>, using the ggml type
-    table.</li>
-<li>Expert <code>e</code>'s slice is <code>[offset + e·bytes/n_expert, offset + (e+1)·bytes/n_expert)</code>.
-    Each expert is contiguous inside a tensor because the expert index is the
-    outermost dimension.</li>
-<li>2-D per-expert tensors (<code>*_exps.bias</code>, <code>[ne0, n_expert]</code>) contribute one
-    row per expert.</li>
-</ul>
-<p>The slices of the same (L, e) are grouped into a <strong>unit</strong>, the granule for
-everything that follows. Slices are 32-byte aligned rather than page
-aligned, so a boundary page can belong to two units. A reverse page→unit
-index (sorted intervals plus a prefix-maximum array) handles this in
-O(log n).</p>
-<p>For each slice, one <strong>sentinel page</strong> is chosen in its middle, at least
-128 KiB from either edge, so that a neighbour's 128 KiB read-around cannot
-trigger it.</p>
-<h2>4.2 Black-box observation</h2>
-<p>The daemon maps the model file read-only and periodically calls <code>mincore()</code>
-on the sentinel pages. This works without root, even for files it doesn't
-own. A sentinel changing from non-resident to resident means "unit
-(L, e) has just been faulted in", which is a <strong>miss</strong>.</p>
-<p>Hits are invisible to user space: pages already mapped are read through the
-CPU's page tables with no kernel involvement. All online statistics are
-therefore computed from misses only (Section 4.4).</p>
-<p>Token boundaries are not visible either. They are inferred from layer
-order: a new token starts when the observed layer drops below the running
-maximum minus a slack. With root, the same events can be taken from the
-<code>filemap:mm_filemap_add_to_page_cache</code> tracepoint (bpftrace script
-included).</p>
-<h2>4.3 Expert-completion readahead (the main mechanism)</h2>
-<p>When a miss of unit u is observed, the daemon immediately issues
-<code>posix_fadvise(WILLNEED)</code> over <strong>all</strong> slices of u, so the parts the engine
-has not reached yet (typically the gate and down slices, hundreds of MB
-away) arrive as large asynchronous reads instead of many small synchronous
-faults. Two details turned out to be essential:</p>
-<ol>
-<li><strong>Chunking.</strong> The kernel silently truncates a single WILLNEED to
-      <code>max(bdi-&gt;io_pages, ra-&gt;ra_pages)</code> pages (<code>force_page_cache_ra()</code> in
-      <code>mm/readahead.c</code>). We found this when CI populated exactly 256 KiB of a
-      1 MiB request. Requests are therefore issued in 128 KiB chunks.</li>
-<li><strong>Refractory window.</strong> Each unit has three sentinels, and the daemon's
-      own prefetch flips the other two. Repeated misses of a unit within
-      20 ms are ignored so that each real miss causes one prefetch.</li>
-</ol>
-<p>The mechanism is prediction-free: it acts only on experts the router has
-already chosen.</p>
-<h2>4.4 Residency policy V(e) (optional, privilege-dependent)</h2>
-<p>For pinning with <code>mlock</code>, each unit e of size s_e gets a value per byte:</p>
-<pre><code>    V(e) = rate(e) · (t_fault + s_e / B_demand) / s_e
+<p>This section defines the problem formally (4.1), then describes each
+algorithm in the order data flows through the system: the expert map
+(4.2), black-box observation (4.3), read-around suppression (4.4),
+expert-completion readahead (4.5), the optional residency policy (4.6) and
+the offline evaluation algorithms (4.7). Sections 4.8–4.10 give the
+experimental protocol, the metric definitions and the threats to validity.
+Every algorithm below corresponds to code in the repository; the crate is
+named in each heading.</p>
+<h2>4.1 Problem model and notation</h2>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>F, P</td>
+<td>the GGUF model file; the page size (4 KiB on the test machine)</td>
+</tr>
+<tr>
+<td>L, E, k</td>
+<td>number of MoE layers, experts per layer, experts chosen per token per layer (top-k)</td>
+</tr>
+<tr>
+<td>u = (l, e)</td>
+<td>an expert <strong>unit</strong>: expert e of layer l; U is the set of all L·E units</td>
+</tr>
+<tr>
+<td>S(u)</td>
+<td>the slices of u: one byte range <code>[a, b)</code> of F per expert tensor (<code>up</code>, <code>gate</code>, <code>down</code>, optional bias rows)</td>
+</tr>
+<tr>
+<td>s_u</td>
+<td>size of unit u in bytes, Σ over S(u) of (b − a)</td>
+</tr>
+<tr>
+<td>R_{t,l}</td>
+<td>the k experts the router selects at decode step (token) t, layer l</td>
+</tr>
+<tr>
+<td>σ</td>
+<td>an access trace: the sequence of units R_{1,1}, R_{1,2}, …, R_{T,L}</td>
+</tr>
+<tr>
+<td>C</td>
+<td>the memory budget: cgroup v2 <code>memory.max</code> [4]</td>
+</tr>
+<tr>
+<td>B_d, B_b</td>
+<td>delivered bandwidth of fault-driven reads and of bulk readahead</td>
+</tr>
+<tr>
+<td>t_f</td>
+<td>fixed cost of one demand miss (fault entry plus first I/O latency)</td>
+</tr>
+</tbody>
+</table>
+<p>Decoding token t touches, layer by layer, every unit in R_{t,l} plus the
+dense (non-expert) tensors of layer l. The engine maps F read-only and
+shared, so every touched byte is served from the page cache, which holds
+at most C bytes (minus the engine's anonymous memory). A unit access is a
+<strong>hit</strong> if all its pages are resident and a <strong>miss</strong> otherwise.</p>
+<p>The quantity to minimise is decode time per token. Under memory pressure
+it is dominated by I/O stall, which a simple cost model captures:</p>
+<pre><code>    stall(miss of u)  =  t_f + s_u / B_d               (kernel default)
+    stall(miss of u)  =  t_f + t_detect + s_u / B_b     (with completion readahead)
 </code></pre>
-<p>Units are pinned greedily in decreasing V order until the pin budget is
-used up. Hysteresis (a newcomer must beat a pinned unit by 25 %) limits
-churn.</p>
-<p>Because only misses are observable, rate(e) is defined as the <strong>miss rate
-per token while unpinned</strong>: decayed miss count ÷ decayed number of tokens
-the unit was exposed (not pinned). That is exactly the counterfactual a pin
-decision needs. While a unit is pinned it produces no misses and no
-exposure, so its estimate is frozen. A small random fraction of pinned
-units is released at each re-plan ("exploration") to refresh stale
-estimates. Exponential decay uses the scaled-weight trick, with periodic
-renormalisation, for O(1) updates.</p>
-<p>Demotion of cold units uses <code>process_madvise(pidfd, MADV_COLD)</code> on the
-engine's mapping, because <code>fadvise(DONTNEED)</code> cannot evict pages another
-process has mapped (verified experimentally).</p>
-<h2>4.5 Simulation and the optimal bound</h2>
-<p><code>mp-sim</code> replays a routing trace against a byte-capacity cache:
-- A hit costs nothing.
-- A miss is queued on a FIFO I/O channel, costing <code>t_fault + s/B_demand</code>,
-    or <code>s/B_bulk</code> when completion readahead is on.
-- Compute time per layer is taken from the trace.</p>
-<p>Policies: LRU, LFU, prefix pinning, an oracle static-frequency pin, V(e)
-with full or miss-only observation, predictive prefetch, and <strong>Belady*</strong>
-(evict the unit whose next use is furthest in the future). Belady* is the
-optimal bound for equal sizes and the standard heuristic for variable
-sizes.</p>
-<p>Independently, <code>mp-analyze</code> computes reuse distances with a Fenwick tree in
-O(N log N) and derives the <strong>exact LRU miss-ratio curve</strong>. An access hits
-in a byte-capacity LRU cache iff (bytes of distinct units since its last
-use) + its own size ≤ capacity. The simulator's LRU agrees with this curve
-exactly, a cross-check between two independent implementations.</p>
-<h2>4.6 Experimental method (go/no-go)</h2>
-<p>Kill criteria were fixed before measuring (IDEA_REVIEW §6):
-- <strong>K1:</strong> Belady* cannot save at least 15 % of misses relative to the
-    kernel.
-- <strong>K2:</strong> fault-driven bandwidth is at least 0.75× bulk bandwidth.
-- <strong>K3:</strong> default llama.cpp beats every page-cache configuration.</p>
-<p>Experiments:</p>
+<p>Two levers follow directly. <strong>Residency</strong> (which units stay cached)
+reduces the number of misses. <strong>Read path</strong> (how a missing unit is read)
+reduces the cost of each one. The original hypothesis was that residency
+is the main lever; Section 6 shows that on an <code>mmap</code> engine the read path
+dominates, because B_d is small and the kernel's read-around inflates the
+bytes read per miss.</p>
+<h2>4.2 Expert map from the GGUF header (<code>mp-gguf</code>)</h2>
+<p>A GGUF file [2] starts with a header listing every tensor's name,
+shape, ggml type and data offset. <code>mp-gguf</code> parses only this header, so a
+truncated prefix of the file is enough. For each tensor named
+<code>blk.&lt;l&gt;.ffn_{up,gate,down,gate_up}_exps.weight</code> with shape
+<code>[ne0, ne1, E]</code>, the expert index is the outermost (slowest-varying)
+dimension, so each expert's weights are contiguous inside the tensor:</p>
+<pre><code>Algorithm 1  BuildExpertMap(header)
+  for each tensor T matching blk.&lt;l&gt;.ffn_*_exps.*:
+      bytes  := type_size(T.type) * (ne0 * ne1 * E) / block_size(T.type)
+      stride := bytes / E                       # warn if E does not divide bytes
+      for e in 0 .. E-1:
+          add slice [T.offset + e*stride, T.offset + (e+1)*stride) to unit (l, e)
+  for each 2-D per-expert tensor ([ne0, E], e.g. *_exps.bias):
+      add one row per expert to unit (l, e)
+  sort all slices by offset; build page-&gt;unit interval index (below)
+  for each slice: choose a sentinel page (Section 4.3)
+</code></pre>
 <ul>
-<li><strong>A: routing.</strong> Record real routing with <code>moe_trace</code>, a 170-line
-    experiment-only tool that reads llama.cpp's <code>ffn_moe_topk-&lt;layer&gt;</code>
-    tensors through the scheduler's eval callback. Three prompts (chat, code,
-    prose) × 255 decode tokens on OLMoE, then analyze and simulate.</li>
-<li><strong>B: real-kernel replay.</strong> Replay the prose trace on the real model file
-    under a cgroup v2 memory wall (<code>systemd-run --user -p MemoryMax=…</code>,
-    swap 0). Measure SSD bytes (<code>/proc/self/io</code>), major faults and time.</li>
-<li><strong>C: bandwidth microbenchmark.</strong> Read cold expert-sized units of the real
-    file through mmap faults, chunked WILLNEED, or pread.</li>
-<li>
-<p><strong>D: end to end.</strong> <code>llama-bench</code> decode throughput under the same memory
-    walls, for:</p>
-<ul>
-<li>B0: default llama.cpp;</li>
-<li>B2: <code>--repack 0</code>;</li>
-<li>D2: B2 + moepagerd;</li>
-<li>P: B2 + read-around off;</li>
-<li>PD: P + moepagerd.</li>
+<li><strong>Page → unit index.</strong> Slices are 32-byte aligned rather than page
+    aligned, so a boundary page can belong to two units. The index stores
+    slices as intervals sorted by start, plus a prefix-maximum array of
+    interval ends, so the owners of any page are found by binary search in
+    O(log n + r), where r ≤ 2 is the number of owners.</li>
+<li><strong>Repacking check.</strong> <code>mp-gguf</code> also reports which expert tensors
+    llama.cpp's CPU backend would repack into anonymous memory, based on
+    the quantisation type and the repack rules in the engine source
+    [1]. On AVX2 this covers 77 % (Q4_K_M) to 100 % (MXFP4) of the
+    expert bytes, so the engine must run with <code>--repack 0</code> / <code>-nr</code> for the
+    weights to stay in the page cache.</li>
+<li><strong>Cost.</strong> O(number of tensors) to parse, O(n log n) to sort the n slices
+    (n = 3·L·E; 3,072 for OLMoE, 18,432 for Qwen3-30B-A3B).</li>
+<li><strong>Verification.</strong> Fixture GGUF files with known layouts are checked
+    slice by slice (kind, offset, length of every unit), the page index is
+    checked against the slices, and the real headers of OLMoE-1B-7B
+    [8], gpt-oss-20b [9] and Qwen3-30B-A3B [10] are checked
+    for layer, expert and top-k counts and unit sizes.</li>
 </ul>
-<p>Daemon and engine always share the cgroup, so page-cache charges count
-against the same budget.</p>
+<h2>4.3 Black-box observation by sentinel pages (<code>mp-recorder</code>)</h2>
+<p>The engine is a black box: the daemon cannot see router decisions. It
+infers them from the page cache, which is shared.</p>
+<p><strong>Sentinel choice.</strong> For each slice, one page in its middle is chosen as
+the <strong>sentinel</strong>, at least 128 KiB (<code>SENTINEL_GUARD</code>) from either edge of
+the slice. A fault in a <em>neighbouring</em> slice brings in a read-around window
+around the faulting page; with the default 128 KiB window, that window
+cannot reach this sentinel. Slices shorter than 2 × 128 KiB + 2P are marked
+unreliable, and bias rows (a few KiB, inside other tensors' pages) get no
+sentinel. On btrfs the window is 4 MiB, larger than a whole OLMoE slice,
+which is why read-around must be turned off (Section 4.4) for observation
+to be correct as well as fast.</p>
+<p><strong>Polling.</strong> The daemon maps F read-only (<code>MAP_SHARED</code>, <code>PROT_READ</code>) and
+calls <code>mincore(2)</code> [3] on the sentinel pages. This needs no
+privilege and works for files the daemon does not own. (<code>cachestat(2)</code>
+would need write access to the file.)</p>
+<pre><code>Algorithm 2  SentinelTick(sentinels, prev, now_ns)       # every Δ = 300 µs
+  events := []
+  for i, s in enumerate(sentinels):
+      r := mincore(s.page)
+      if r and not prev[i] and (s.layer, s.expert) not in events:
+          events.append((now_ns, s.layer, s.expert))      # a miss of unit (l, e)
+      prev[i] := r
+  return events
+</code></pre>
+<ul>
+<li><strong>Semantics.</strong> A sentinel changing from non-resident to resident means
+    "unit (l, e) has just been faulted in", which is a <strong>miss</strong>. Hits are
+    invisible: pages already mapped are read through the CPU's page tables
+    without entering the kernel, so no user-space interface reports them.
+    All online statistics are therefore <em>miss-only</em> (ADR 0002).</li>
+<li><strong>Cost.</strong> One <code>mincore</code> call per sentinel per sweep: O(3·L·E) system
+    calls every Δ. The poll period Δ bounds detection latency to at most Δ
+    plus the remaining sweep time.</li>
+<li><strong>False positives.</strong> A sentinel can also turn resident because of the
+    daemon's own prefetch of the same unit, or because read-around from an
+    unrelated fault reached it. The first case is harmless (it re-issues a
+    prefetch for a unit being read anyway). The second is eliminated by
+    turning read-around off.</li>
+<li><strong>Privileged alternative.</strong> With root, the same events can be taken
+    exactly from the <code>filemap:mm_filemap_add_to_page_cache</code> tracepoint; a
+    bpftrace script is included (ADR 0009). It was not used for the results.</li>
+</ul>
+<p><strong>Token boundaries</strong> are not visible either. Within one decode step layers
+are visited in increasing order, so a new token is inferred when an event's
+layer falls more than a slack (default 2 layers) below the highest layer
+seen in the current step:</p>
+<pre><code>Algorithm 3  InferToken(event)                             # ADR 0010
+  if max_layer is set and event.layer + slack &lt; max_layer:
+      end_token()                       # closes statistics, may trigger re-plan
+  max_layer := max(max_layer, event.layer)
+</code></pre>
+<p>The slack absorbs reordering when several layers are discovered in the
+same sweep. On ground-truth traces this recovers the true token count; on
+miss-only traces a token whose misses are all in high layers can merge
+with the previous one, which only affects the V(e) rate estimates.</p>
+<h2>4.4 Read-around suppression (<code>tools/preload</code>)</h2>
+<p>On a page fault in a file mapping, Linux reads a window of pages around
+the faulting address ("read-around"), sized from the backing device's
+<code>read_ahead_kb</code> (4 MiB for this machine's btrfs). For a 1–1.3 MB expert
+slice, most of that window is neighbouring experts that will not be used.
+The waste has two effects: up to 3.7–4.8× more SSD traffic than needed,
+and a cache filled with unused pages, which raises the miss ratio.</p>
+<p>Setting <code>MADV_RANDOM</code> on the mapping (<code>VM_RAND_READ</code> in the kernel)
+disables read-around for it, so a fault reads exactly the faulting page.
+Stock llama.cpp applies this only when <code>--numa</code> is set on a multi-node
+machine. A 64-line <code>LD_PRELOAD</code> shim wraps <code>mmap()</code> and, for read-only
+shared mappings of <code>*.gguf</code> files, calls <code>madvise(addr, len, MADV_RANDOM)</code>
+after the original <code>mmap</code> returns (ADR 0011). The engine's code and binary
+are unchanged. The daemon verifies the effect by checking for the <code>rr</code>
+flag in the engine's <code>/proc/&lt;pid&gt;/smaps</code> VmFlags and warns if it is
+missing.</p>
+<p>Turning read-around off alone trades one problem for another: each miss
+becomes hundreds of synchronous 4 KiB faults (39,000 per token in
+Experiment B). Completion readahead (next section) turns them back into
+bulk reads, but only for the unit that was actually chosen.</p>
+<h2>4.5 Expert-completion readahead (<code>moepagerd</code>, <code>mp-os</code>)</h2>
+<p>When a miss of unit u is observed, the daemon immediately asks the kernel
+to read <strong>all</strong> of u asynchronously. The engine is typically still inside
+the first slice (<code>up</code>); the <code>gate</code> and <code>down</code> slices, hundreds of
+megabytes away in the file, arrive as large reads instead of thousands of
+small faults.</p>
+<pre><code>Algorithm 4  OnMiss(u)                                     # mp-core::prefetch
+  for each slice [a, b) in S(u):
+      for c in a, a+128K, a+256K, ... &lt; b:                  # chunked (ADR 0006)
+          posix_fadvise(fd, c, min(128K, b - c), POSIX_FADV_WILLNEED)
+  stats.observe(u, MISS)
+</code></pre>
+<ul>
+<li><strong>Chunking.</strong> A single <code>WILLNEED</code> is silently truncated by
+    <code>force_page_cache_ra()</code> in <code>mm/readahead.c</code> [12] to
+    max(<code>io_pages</code>, <code>ra_pages</code>) pages, so a 1 MiB request populated only
+    256 KiB in our tests. Issuing 128 KiB chunks makes every byte requested
+    actually read.</li>
+<li><strong>Asynchrony.</strong> <code>WILLNEED</code> queues reads and returns, so the daemon never
+    blocks on I/O. The alternative <code>MADV_POPULATE_READ</code>
+    (<code>--prefetch-mode populate</code>) is synchronous and runs on a worker thread;
+    it is for devices where readahead is disabled and <code>WILLNEED</code> has no
+    effect.</li>
+<li><strong>Prediction-free.</strong> The action is taken only for units the router has
+    already chosen, so it never wastes bandwidth on wrong guesses. A
+    cross-layer predictive variant (<code>--predict</code>) exists but is not
+    recommended (Section 6).</li>
+<li><strong>Repeated misses.</strong> Each unit has three sentinels, so one real miss can
+    trigger up to three prefetches of the unit. A refractory window that
+    suppressed repeats within 20 ms was evaluated and <em>doubled</em> misses
+    (Phase 7 ablation: decode speed fell from 5.4 to 2.1 tok/s), because
+    the repeats re-fetch pages reclaimed while the engine is still working
+    through the unit. The window is therefore off by default.</li>
+<li><strong>Cost.</strong> O(s_u / 128 KiB) system calls per miss, about 30 for an OLMoE
+    unit; no data is copied, and the pages are shared with the engine.</li>
+<li><strong>Memory accounting.</strong> Pages read on the daemon's behalf are charged to
+    the daemon's cgroup. Daemon and engine are therefore run in the same
+    cgroup (ADR 0008), so prefetching cannot exceed the budget C.</li>
+</ul>
+<h2>4.6 Residency policy V(e) (<code>mp-core</code>; optional, needs privilege)</h2>
+<p>With <code>CAP_IPC_LOCK</code> (or a raised <code>RLIMIT_MEMLOCK</code>), the daemon can pin
+units with <code>mlock</code> through its own shared mapping, which pins the same
+page-cache folios the engine reads. The policy chooses a pinned set
+within a pin budget C_pin ≤ C by <strong>value per byte</strong>:</p>
+<pre><code>    V(u) = rate(u) · (t_f + s_u / B_d) / s_u
+</code></pre>
+<p>that is, the expected stall avoided per token per byte held. This is a
+fractional-knapsack relaxation; the greedy order is optimal for the
+relaxation and near-optimal when units are small compared with C_pin.</p>
+<p><strong>Rate estimator under miss-only observation.</strong> A pinned unit produces no
+misses, so naive miss counts would make every pinned unit look cold.
+rate(u) is instead defined as the <strong>miss rate per token while unpinned</strong>:</p>
+<pre><code>    rate(u) = (Σ_t w_t · miss_t(u) + p·k) / (Σ_{t: u unpinned at t} w_t + k)
+</code></pre>
+<ul>
+<li>w_t = g^t with g = 2^{1/h} is an exponential decay weight with half-life
+    h = 64 tokens, implemented by growing the weight of new events instead
+    of shrinking old ones (O(1) per event, renormalised when w exceeds
+    10^100).</li>
+<li>p is a prior rate and k = 0.05·w_t a light shrinkage, so a unit exposed
+    for one token is not estimated at exactly 0 or 1.</li>
+<li>While a unit is pinned its estimate is frozen. At each re-plan a random
+    2 % of pinned units are released ("exploration") so frozen estimates
+    are refreshed.</li>
+</ul>
+<pre><code>Algorithm 5  Replan(stats, cost)                  # every 4 tokens (replan_every)
+  excluded := random 2 % of pinned units          # exploration, miss-only only
+  cand := [(V(u) * (1.25 if pinned[u] else 1), u) for u not excluded, V(u) &gt; 0]
+  sort cand by value descending                   # hysteresis factor 1.25
+  want := {}; used := 0
+  for (v, u) in cand:
+      if used + s_u &lt;= C_pin: want += u; used += s_u
+  emit Unpin(u) [+ Demote(u)] for u pinned and not in want     # unpins first,
+  emit Pin(u) for u in want and not pinned                     # so C_pin holds
+</code></pre>
+<ul>
+<li><strong>Cost.</strong> O(n log n) per re-plan for n = L·E units (1,024 for OLMoE),
+    amortised over 4 tokens.</li>
+<li><strong>Hysteresis.</strong> A pinned unit's value is multiplied by 1.25 when
+    ranking, so a newcomer must beat it by 25 % to displace it. This bounds
+    pin/unpin churn.</li>
+<li><strong>Demotion.</strong> Units that leave the pinned set can be marked cold with
+    <code>process_madvise(pidfd, MADV_COLD)</code> on the engine's mapping (needs
+    <code>CAP_SYS_NICE</code>). <code>posix_fadvise(DONTNEED)</code> was rejected because it does
+    not drop pages that another process has mapped (verified on Linux 6.19;
+    ADR 0003).</li>
+</ul>
+<p>The policy code is one Rust implementation used by both the simulator and
+the daemon (ADR 0001), so simulated and live behaviour cannot drift apart.</p>
+<h2>4.7 Offline evaluation algorithms (<code>mp-sim</code>, <code>mp-analyze</code>)</h2>
+<p><strong>Trace-driven simulation.</strong> <code>mp-sim</code> replays a trace σ against a cache of
+C bytes:</p>
+<ul>
+<li>a hit costs nothing;</li>
+<li>a miss is queued on a single FIFO I/O channel and costs
+    <code>t_f + s/B_d</code>, or <code>t_f + t_detect + s/B_b</code> with completion readahead;</li>
+<li>compute time per layer is taken from the trace timestamps;</li>
+<li>the reported quantities are miss ratio, bytes read, and modelled stall.</li>
+</ul>
+<p>Policies compared: LRU (a stand-in for the kernel's MGLRU [5]), LFU,
+prefix pinning, an oracle static-frequency pin, V(e) with full or
+miss-only observation, predictive prefetch, and <strong>Belady*</strong>.</p>
+<p><strong>Belady*</strong> evicts the cached unit whose next use is furthest in the
+future [21]. For equal sizes this is optimal (MIN). With variable
+sizes exact optimality is NP-hard, so the same rule is used as the
+standard heuristic and labelled with an asterisk. Implementation: for
+each unit, the sorted list of its positions in σ; the next use after
+position i is found by binary search; cached units are kept in an ordered
+set keyed by next use, so each access costs O(log N).</p>
+<p><strong>Exact LRU miss-ratio curve.</strong> <code>mp-analyze</code> computes, independently of
+the simulator, the miss ratio of a byte-capacity LRU cache at <em>every</em>
+capacity in one pass, using stack-distance analysis [27] with a
+Fenwick tree [28]:</p>
+<pre><code>Algorithm 6  ByteReuseDistances(σ)
+  fenwick := zeros(N)                      # one slot per trace position
+  for i, u in enumerate(σ):
+      if last[u] exists:
+          D_i := fenwick.sum(last[u]+1 .. i-1)   # bytes of distinct units since last use
+          fenwick.add(last[u], -s_u)
+      else:
+          D_i := infinity                        # cold miss
+      fenwick.add(i, +s_u); last[u] := i
+  # access i hits in LRU of capacity C  &lt;=&gt;  D_i + s_u &lt;= C
+  MRC(C) := |{ i : D_i + s_u &gt; C }| / N         # sort thresholds once, O(N log N)
+</code></pre>
+<p>Each position holds the size of the unit whose <em>latest</em> access is there,
+so a range sum counts each distinct unit once. The whole curve costs
+O(N log N). The simulator's LRU agrees with this curve exactly at every
+tested capacity; this cross-check between two independent
+implementations is a regression test.</p>
+<h2>4.8 Experimental protocol</h2>
+<p><strong>Hypotheses and kill criteria.</strong> The project was run as a go/no-go
+experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
+§6):</p>
+<ul>
+<li><strong>K1:</strong> Belady* cannot save at least 15 % of misses relative to LRU at
+    any realistic capacity → residency management is pointless.</li>
+<li><strong>K2:</strong> fault-driven bandwidth is at least 0.75× bulk bandwidth → the
+    read path is not worth changing.</li>
+<li><strong>K3:</strong> default llama.cpp beats every page-cache configuration at equal
+    memory → the approach has no user.</li>
+</ul>
+<p><strong>Experiments.</strong></p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Question</th>
+<th>Independent variables</th>
+<th>Measured</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A</strong></td>
+<td>How local and predictable is real routing; how much could any policy gain?</td>
+<td>prompt domain (chat, code, prose); cache size 15–70 % of expert bytes; policy</td>
+<td>reuse, concentration, next-layer recall; miss ratio per policy</td>
+</tr>
+<tr>
+<td><strong>B</strong></td>
+<td>What does the real kernel do with this access pattern?</td>
+<td>memory budget (1.5, 2.5 GB); read-around on/off; daemon on/off</td>
+<td>tokens/s, SSD bytes/token, major faults/token</td>
+</tr>
+<tr>
+<td><strong>C</strong></td>
+<td>How fast are fault-driven vs bulk reads of expert units?</td>
+<td>read method (fault, WILLNEED one call, WILLNEED 128 KiB chunks, pread 1 MiB)</td>
+<td>GB/s delivered, read amplification</td>
+</tr>
+<tr>
+<td><strong>D</strong></td>
+<td>Does it help a real engine end to end?</td>
+<td>budget; configuration B0, B0S, B2, D2, P, PD</td>
+<td>decode tokens/s, SSD bytes/token, faults/token, memory PSI</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li><strong>A: ground truth.</strong> <code>moe_trace</code>, a 170-line experiment-only program,
+    records the router's choices through llama.cpp's scheduler eval
+    callback by reading the <code>ffn_moe_topk-&lt;l&gt;</code> tensors row by row. Three
+    prompts × 255 decode tokens give 32,640 unit uses per prompt for OLMoE
+    (255 × 16 layers × top-8). The traces are then analysed
+    (4.7) and simulated at seven capacities.</li>
+<li><strong>B: real-kernel replay.</strong> <code>moepager replay</code> touches, for each token of
+    the prose trace, every page of every chosen unit through <code>mmap</code> with 4
+    threads (64 KiB chunks interleaved). It isolates the kernel's paging
+    behaviour from the engine's compute.</li>
+<li><strong>C: bandwidth.</strong> 32 cold, randomly chosen expert-sized ranges of the
+    real file per method, 3 seeds, 8 threads.</li>
+<li><strong>D: end to end.</strong> <code>llama-bench -p 0 -n 32 -r 3 -t 8 -lm mmap</code>
+    [1]. Configurations: B0 default (repacking, zram swap allowed);
+    B0S default without swap; B2 <code>--repack 0</code>; D2 B2 + moepagerd; P B2 +
+    read-around off (shim); PD P + moepagerd.</li>
+</ul>
+<p><strong>Controls applied to every run:</strong></p>
+<ul>
+<li><strong>Cold start:</strong> the model's pages are dropped with
+    <code>posix_fadvise(DONTNEED)</code> while no process maps it, followed by <code>sync</code>
+    and a 5 s settle.</li>
+<li><strong>Memory wall:</strong> each run executes in a transient cgroup v2 scope
+    (<code>systemd-run --user --scope -p MemoryMax=C -p MemorySwapMax=0</code>)
+    [4]. Swap is allowed only for B0 (<code>MemorySwapMax=infinity</code>).
+    Daemon and engine share the scope.</li>
+<li><strong>Same binary, same file:</strong> one llama.cpp build (commit 970b51c), one
+    GGUF file per model, CPU only, 8 threads (<code>nproc</code> − 4).</li>
+<li><strong>Environment capture:</strong> kernel version, CPU, free memory, filesystem
+    type, every bdi's <code>read_ahead_kb</code>, MGLRU state and the llama.cpp commit
+    are saved with each result set (<code>env.txt</code>).</li>
+<li><strong>Isolation of runs:</strong> no test suite or build ran concurrently with
+    measurements; one set of D runs that overlapped a test run was
+    discarded and repeated.</li>
+</ul>
+<h2>4.9 Metric definitions</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Definition</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>tokens/s (D)</td>
+<td>llama-bench <code>tg</code> mean ± standard deviation over repetitions</td>
+<td>llama-bench output</td>
+</tr>
+<tr>
+<td>tokens/s (B)</td>
+<td>replayed tokens ÷ wall time</td>
+<td>replay tool</td>
+</tr>
+<tr>
+<td>SSD bytes / token (D)</td>
+<td>(sectors read on the model's block device after − before) × 512 ÷ tokens; tokens = n_gen × reps + 1 (warm-up)</td>
+<td><code>/proc/diskstats</code></td>
+</tr>
+<tr>
+<td>Data read / token (B)</td>
+<td>(<code>pgsteal</code> × 4 KiB + <code>file</code> at exit) ÷ tokens: page-cache inflow charged to the run's cgroup, including the daemon's reads</td>
+<td>cgroup <code>memory.stat</code></td>
+</tr>
+<tr>
+<td>Major faults / token</td>
+<td>D: <code>pgmajfault</code> of the cgroup ÷ tokens; B: the replayer's <code>ru_majflt</code> ÷ tokens</td>
+<td>cgroup <code>memory.stat</code>, <code>getrusage</code></td>
+</tr>
+<tr>
+<td>Memory PSI</td>
+<td><code>some avg10</code> of the cgroup's <code>memory.pressure</code> at exit: share of the last 10 s in which at least one task stalled on memory [29]</td>
+<td>cgroup</td>
+</tr>
+<tr>
+<td>Read amplification</td>
+<td>bytes read from storage ÷ expert bytes needed</td>
+<td>C: <code>/proc/self/io</code> (single process, no daemon)</td>
+</tr>
+<tr>
+<td>Miss ratio</td>
+<td>misses ÷ unit accesses</td>
+<td>simulator, MRC</td>
+</tr>
+<tr>
+<td>Belady* saving</td>
+<td>1 − misses(Belady*) ÷ misses(LRU) at equal capacity</td>
+<td>simulator</td>
+</tr>
+<tr>
+<td>Next-layer recall</td>
+<td>share of R_{t,l+1} contained in a size-k prediction made after layer l</td>
+<td><code>mp-analyze</code></td>
+</tr>
+</tbody>
+</table>
+<p>Only measured numbers are reported. Where a configuration did not finish
+(OOM kill, timeout), it is reported as such, never as zero or
+extrapolated.</p>
+<h2>4.10 Threats to validity</h2>
+<ul>
+<li><strong>Internal.</strong><ul>
+<li>A desktop session ran during the measurements; background activity
+    adds noise, visible as run-to-run spread in some D configurations.</li>
+<li>B uses one replay per variant; D uses 3 repetitions of 32 tokens.
+    Differences below about 10 % should not be read as significant.</li>
+<li><code>/home</code> is btrfs with zstd compression, so device bytes can be lower
+    than logical bytes. Quantised weights compress poorly, and the
+    comparisons are between configurations on the same file.</li>
+<li>Per-process I/O counters (<code>/proc/self/io</code>) do not include reads
+    issued by another process. B's traffic is therefore taken from the
+    cgroup (4.9); an earlier draft used the replayer's own counter and
+    understated the daemon variants by 0.1–0.6 GB/token.</li>
+<li>B0's swap device is zram, which is RAM. Its "fast" result uses memory
+    outside the 1.5 / 2.5 GB budget, so it is reported separately.</li>
+</ul>
 </li>
+<li><strong>Construct.</strong><ul>
+<li>The replay tool (B) touches pages but does not compute; it measures
+    paging, not inference. D measures the real engine.</li>
+<li>LRU in the simulator is an approximation of MGLRU [5]; B shows
+    the kernel's behaviour directly.</li>
+<li>Belady* with variable sizes is a heuristic bound, not a proven
+    optimum.</li>
+</ul>
+</li>
+<li><strong>External.</strong><ul>
+<li>One machine, one SSD, one filesystem. Read-around on ext4 defaults to
+    128 KiB, so the pollution effect, and the benefit of turning it off,
+    will be smaller there.</li>
+<li>End-to-end results exist for OLMoE only. gpt-oss-20b has A–C
+    results; its D run was stopped because the B0 configuration exhausted
+    system memory. Qwen3-30B-A3B was mapped from its header only.</li>
+<li>Only llama.cpp's CPU backend was studied.</li>
+</ul>
+</li>
+<li><strong>Conclusion.</strong> The go/no-go decision depends on K1–K3 as defined
+    before measuring; the unanticipated read-around finding is reported as
+    such rather than folded into the original hypothesis.</li>
 </ul>
 <h1>5. Implementation</h1>
 <h2>5.1 Technology stack and structure</h2>
@@ -583,11 +1335,11 @@ on the real OLMoE model follow.</p>
 </tr>
 <tr>
 <td>Engine</td>
-<td>llama.cpp commit 970b51c (2026-10-22), CPU only, 8 threads</td>
+<td>llama.cpp [1] commit 970b51c (2026-10-22), CPU only, 8 threads</td>
 </tr>
 <tr>
 <td>Model</td>
-<td>OLMoE-1B-7B-0924 Q4_K_M (4.21 GB; 16 layers × 64 experts, top-8; experts 3.90 GB, units ≈ 3.8 MB)</td>
+<td>OLMoE-1B-7B-0924 [8] Q4_K_M (4.21 GB; 16 layers × 64 experts, top-8; experts 3.90 GB, units ≈ 3.8 MB)</td>
 </tr>
 <tr>
 <td>Memory budget</td>
@@ -694,13 +1446,15 @@ caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 </tbody>
 </table>
 <p><img alt="Simulated policies" src="fig-sim-prose.png" /></p>
-<p><strong>Reading:</strong>
-- An optimal policy would avoid 34–74 % of LRU's misses at 15–50 %
+<p><strong>Reading:</strong></p>
+<ul>
+<li>An optimal policy would avoid 34–74 % of LRU's misses at 15–50 %
     capacity across all three prompts, so kill criterion <strong>K1 does not
-    fire</strong>.
-- Our V(e) residency policy captures only part of that gap. It beats LRU
-    at 25–50 % but is <em>worse</em> at 15 %.
-- Plain LFU beats V(e) in most cells.</p>
+    fire</strong>.</li>
+<li>Our V(e) residency policy captures only part of that gap. It beats LRU
+    at 25–50 % but is <em>worse</em> at 15 %.</li>
+<li>Plain LFU beats V(e) in most cells.</li>
+</ul>
 <p><strong>Why V(e) lagged (pin-fraction sweep).</strong> The default lets V(e) pin only
 60 % of the cache and leaves the rest to LRU. With full observation and a
 pin fraction of 0.95, V(e) matches LFU almost exactly: prose at 50 %, 0.081
@@ -716,13 +1470,20 @@ Data: <code>bench/results/phase7-olmoe/pinfrac-sweep/</code>.</p>
 <p>The prose trace was replayed on the real model file through <code>mmap</code>, with 4
 threads touching each expert's pages, under the memory wall. The trace
 needs 0.49 GB of expert data per token.</p>
+<p>"Data read" is the page-cache inflow charged to the run's cgroup:
+reclaimed pages (<code>pgsteal</code>) plus file pages still charged at exit
+(Section 4.9). It includes the reads moepagerd issues on the engine's
+behalf. An earlier version of this table used the replayer's own
+<code>/proc/self/io</code>, which leaves out the daemon's reads and so understated
+traffic for the two daemon variants; on the four daemon-free runs the two
+counters agree to within 0.001 GB/token.</p>
 <table>
 <thead>
 <tr>
 <th>Budget</th>
 <th>Variant</th>
 <th>tokens/s</th>
-<th>SSD read / token</th>
+<th>Data read / token (incl. daemon)</th>
 <th>Major faults / token</th>
 </tr>
 </thead>
@@ -745,14 +1506,14 @@ needs 0.49 GB of expert data per token.</p>
 <td>1.5 GB</td>
 <td>+ moepagerd (read-around on)</td>
 <td>0.66</td>
-<td>1.61 GB</td>
+<td>2.23 GB</td>
 <td>881</td>
 </tr>
 <tr>
 <td>1.5 GB</td>
 <td><strong>read-around off + moepagerd</strong></td>
 <td><strong>2.58</strong></td>
-<td>0.05 GB</td>
+<td>0.15 GB</td>
 <td>12,342</td>
 </tr>
 <tr>
@@ -773,36 +1534,38 @@ needs 0.49 GB of expert data per token.</p>
 <td>2.5 GB</td>
 <td>+ moepagerd (read-around on)</td>
 <td>2.82</td>
-<td>0.36 GB</td>
+<td>0.49 GB</td>
 <td>321</td>
 </tr>
 <tr>
 <td>2.5 GB</td>
 <td>read-around off + moepagerd</td>
 <td>2.48</td>
-<td>0.05 GB</td>
+<td>0.15 GB</td>
 <td>12,641</td>
 </tr>
 </tbody>
 </table>
 <p><img alt="Replay" src="fig-replay.png" /></p>
-<p><strong>Reading:</strong>
-- <strong>Read-around pollution dominates.</strong> With the kernel's default 4 MiB
+<p><strong>Reading:</strong></p>
+<ul>
+<li><strong>Read-around pollution dominates.</strong> With the kernel's default 4 MiB
     read-around, the SSD read 1.80 GB per token at 1.5 GB to deliver
     0.49 GB, and nearly every expert access missed: neighbouring, unused
-    experts filled the cache.
-- <strong>The simulator is validated once pollution is removed.</strong> With
+    experts filled the cache.</li>
+<li><strong>The simulator is validated once pollution is removed.</strong> With
     read-around off, traffic fell 11× to 0.16 GB/token, which matches the
     simulator's LRU prediction for this capacity (0.14 GB/token, Section
-    6.2).
-- <strong>Fewer bytes alone is not faster.</strong> Read-around off produced 39,000
-    small 4 KiB faults per token, so speed stayed at 0.75 tok/s.
-- <strong>moepagerd needs read-around off.</strong> With read-around on, its sentinels
+    6.2).</li>
+<li><strong>Fewer bytes alone is not faster.</strong> Read-around off produced 39,000
+    small 4 KiB faults per token, so speed stayed at 0.75 tok/s.</li>
+<li><strong>moepagerd needs read-around off.</strong> With read-around on, its sentinels
     fire on polluted pages and it made things slightly worse. With
     read-around off it turns the small faults into bulk reads: <strong>3.3×
-    faster</strong> than the kernel default at 1.5 GB.
-- At 2.5 GB, where most accesses already hit, read-around off alone was
-    best in this replay; the daemon added overhead.</p>
+    faster</strong> than the kernel default at 1.5 GB.</li>
+<li>At 2.5 GB, where most accesses already hit, read-around off alone was
+    best in this replay; the daemon added overhead.</li>
+</ul>
 <h2>6.4 Experiment C: fault-driven vs bulk read bandwidth</h2>
 <p>32 cold expert units (3.8 MB each, three slices) of the real model file
 were read in three ways, 3 seeds each:</p>
@@ -959,27 +1722,33 @@ memory-pressure "some" average over the last 10 s at exit.</p>
 </tbody>
 </table>
 <p><img alt="End to end" src="fig-e2e.png" /></p>
-<p><strong>Against the same engine serving weights from the page cache (B2):</strong>
-- PD is <strong>4.0× faster at 1.5 GB</strong> and <strong>3.7× faster at 2.5 GB</strong>.
-- PD reads <strong>8.4× and 7.0× fewer bytes from the SSD</strong> per token.
-- PD cuts memory-pressure stall (PSI) from 12.7 % to 1.0 % at 1.5 GB.
-    This matters for other applications on the machine.</p>
-<p><strong>Splitting the gain:</strong>
-- Turning read-around off accounts for 2.1–2.9×.
-- moepagerd's completion readahead adds a further 1.9× (1.5 GB) and 1.3×
-    (2.5 GB) on top.
-- moepagerd <em>without</em> read-around off (D2) helps only 1.3–1.4×.</p>
+<p><strong>Against the same engine serving weights from the page cache (B2):</strong></p>
+<ul>
+<li>PD is <strong>4.0× faster at 1.5 GB</strong> and <strong>3.7× faster at 2.5 GB</strong>.</li>
+<li>PD reads <strong>8.4× and 7.0× fewer bytes from the SSD</strong> per token.</li>
+<li>PD cuts memory-pressure stall (PSI) from 12.7 % to 1.0 % at 1.5 GB.
+    This matters for other applications on the machine.</li>
+</ul>
+<p><strong>Splitting the gain:</strong></p>
+<ul>
+<li>Turning read-around off accounts for 2.1–2.9×.</li>
+<li>moepagerd's completion readahead adds a further 1.9× (1.5 GB) and 1.3×
+    (2.5 GB) on top.</li>
+<li>moepagerd <em>without</em> read-around off (D2) helps only 1.3–1.4×.</li>
+</ul>
 <p><strong>Variability:</strong> PD at 2.5 GB was measured in three independent sessions:
 3.30 (1 repetition), 5.42 ± 1.07 and 3.21 ± 0.65 tok/s. The table reports
 the last.</p>
-<p><strong>Against default llama.cpp (B0):</strong>
-- B0 is faster (3.17 and 7.89 tok/s), but it gets there by pushing <strong>2.5 GB
+<p><strong>Against default llama.cpp (B0):</strong></p>
+<ul>
+<li>B0 is faster (3.17 and 7.89 tok/s), but it gets there by pushing <strong>2.5 GB
     and 2.3 GB of repacked weights into zram</strong>, compressed swap that lives in
     RAM and is not counted against <code>memory.max</code> (journal: "1.4G memory peak,
-    2.5G memory swap peak"). It therefore used far more than the budget.
-- With swap disabled, so it is held to the same budget (B0S), default
-    llama.cpp was <strong>OOM-killed at both budgets</strong>: it cannot run at all.
-- moepager's configuration runs inside the budget.</p>
+    2.5G memory swap peak"). It therefore used far more than the budget.</li>
+<li>With swap disabled, so it is held to the same budget (B0S), default
+    llama.cpp was <strong>OOM-killed at both budgets</strong>: it cannot run at all.</li>
+<li>moepager's configuration runs inside the budget.</li>
+</ul>
 <p>A fair speed comparison against default llama.cpp therefore needs a
 machine whose swap is on disk, or a budget that includes zram. That is
 future work.</p>
@@ -1046,7 +1815,7 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
 <th>Budget</th>
 <th>Variant</th>
 <th>tokens/s</th>
-<th>SSD read / token</th>
+<th>Data read / token (incl. daemon)</th>
 </tr>
 </thead>
 <tbody>
@@ -1066,13 +1835,13 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
 <td>4 GB</td>
 <td>+ moepagerd (read-around on)</td>
 <td>1.11</td>
-<td>0.73 GB</td>
+<td>1.12 GB</td>
 </tr>
 <tr>
 <td>4 GB</td>
 <td><strong>read-around off + moepagerd</strong></td>
 <td><strong>1.64</strong></td>
-<td><strong>0.07 GB</strong></td>
+<td><strong>0.31 GB</strong></td>
 </tr>
 <tr>
 <td>6 GB</td>
@@ -1090,28 +1859,32 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
 <td>6 GB</td>
 <td>+ moepagerd (read-around on)</td>
 <td>3.27</td>
-<td>0.25 GB</td>
+<td>0.36 GB</td>
 </tr>
 <tr>
 <td>6 GB</td>
 <td><strong>read-around off + moepagerd</strong></td>
 <td><strong>5.47</strong></td>
-<td><strong>0.02 GB</strong></td>
+<td><strong>0.11 GB</strong></td>
 </tr>
 </tbody>
 </table>
 <p><img alt="gpt-oss replay" src="fig-replay-gptoss.png" /></p>
-<p><strong>Reading:</strong>
-- The best configuration is the same as for OLMoE: read-around off plus
+<p><strong>Reading:</strong></p>
+<ul>
+<li>The best configuration is the same as for OLMoE: read-around off plus
     completion readahead, <strong>1.6× and 2.0× faster</strong> than the kernel default,
-    with <strong>15–20× less SSD traffic</strong>.
-- Two differences from OLMoE:
-    - gpt-oss's expert slices (4.4 MB) are about as large as the read-around
-        window, so read-around wastes less (≈ 1.05× at 4 GB).
-    - Read-around off <em>alone</em> is slower than the default here, because 4 KiB
-        faults replace useful large reads.
-- moepagerd turns those small faults back into bulk reads, and also helps
-    somewhat on its own with read-around on (1.06× and 1.22×).</p>
+    with <strong>3–4× less data read</strong> (0.31 vs 1.33 and 0.11 vs 0.36 GB/token).</li>
+<li>Two differences from OLMoE:<ul>
+<li>gpt-oss's expert slices (4.4 MB) are about as large as the read-around
+    window, so read-around wastes less (≈ 1.05× at 4 GB).</li>
+<li>Read-around off <em>alone</em> is slower than the default here, because 4 KiB
+    faults replace useful large reads.</li>
+</ul>
+</li>
+<li>moepagerd turns those small faults back into bulk reads, and also helps
+    somewhat on its own with read-around on (1.06× and 1.22×).</li>
+</ul>
 <h2>6.7 Comparison with expected outcomes and with existing methods</h2>
 <table>
 <thead>
@@ -1139,23 +1912,28 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
 </tr>
 </tbody>
 </table>
-<p><strong>Relation to existing methods:</strong>
-- Si et al. found that <code>fadvise</code> lookahead hints gain ≤ 5 % on a GH200
+<p><strong>Relation to existing methods:</strong></p>
+<ul>
+<li>Si et al. [20] found that <code>fadvise</code> lookahead hints gain ≤ 5 % on a GH200
     with a <code>pread</code>-based engine. Our result differs because on an
     mmap-based engine the problem is <em>how</em> missing experts are read (small
     synchronous faults plus large wasted read-around), not <em>which</em> experts
-    to keep. Completion readahead attacks exactly that.
-- In-engine systems (MoE-Infinity, HOBBIT, llama.cpp PR #25294) see router
+    to keep. Completion readahead attacks exactly that.</li>
+<li>In-engine systems (MoE-Infinity [14], HOBBIT [15], llama.cpp
+    PR #25294 [19]) see router
     decisions directly and can avoid the issue entirely. moepager reaches a
     3.7–4.0× improvement over the stock page-cache path without modifying
-    the engine's code or binary, at the cost of one <code>LD_PRELOAD</code> hint.</p>
+    the engine's code or binary, at the cost of one <code>LD_PRELOAD</code> hint.</li>
+</ul>
 <h2>6.8 Go / no-go decision</h2>
-<p><strong>GO, with narrowed scope</strong> (recorded in PHASES.md):
-- The product is "read-around off + expert-completion readahead",
-    validated end to end.
-- V(e) pinning and predictive prefetch are demoted to research options.
-- The next phase must validate on a second machine with disk swap and
-    ext4, and on a larger model.</p>
+<p><strong>GO, with narrowed scope</strong> (recorded in PHASES.md):</p>
+<ul>
+<li>The product is "read-around off + expert-completion readahead",
+    validated end to end.</li>
+<li>V(e) pinning and predictive prefetch are demoted to research options.</li>
+<li>The next phase must validate on a second machine with disk swap and
+    ext4, and on a larger model.</li>
+</ul>
 <h1>7. Conclusion</h1>
 <h2>7.1 Summary</h2>
 <p>We built moepager, a toolchain and daemon that manages the Linux page cache
@@ -1221,23 +1999,41 @@ reads. See Section 6.5 for the end-to-end numbers.
       longer runs.</li>
 <li>Evaluate pinning end to end with <code>CAP_IPC_LOCK</code> and a pin budget near
       90 % of the expert cache. Narrow the miss-only gap with privileged hit
-      observation (DAMON) where available.</li>
+      observation (DAMON [23]) where available.</li>
 <li>Add a fallback when WILLNEED is ineffective (<code>MADV_POPULATE_READ</code>), and
-      PSI-driven control of the memory budget to protect other applications.</li>
+      PSI-driven [29] control of the memory budget to protect other
+      applications.</li>
 </ol>
 <h1>8. References</h1>
-<ol>
-<li>A. Eliseev, D. Mazur. <em>Fast Inference of Mixture-of-Experts Language Models with Offloading.</em> arXiv:2312.17238, 2023.</li>
-<li>L. Xue et al. <em>MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache.</em> arXiv:2401.14361, 2024.</li>
-<li><em>HOBBIT: A Mixed Precision Expert Offloading System for Fast MoE Inference.</em> arXiv:2411.01433, 2024.</li>
-<li>K. Alizadeh et al. <em>LLM in a flash: Efficient Large Language Model Inference with Limited Memory.</em> ACL 2024 (arXiv:2312.11514).</li>
-<li>Y. Si, Y. Lin, D. Li, J. Zhang. <em>Who Should Own the Expert Cache? Kernel-Managed Tiering for Trillion-Parameter MoE Inference.</em> arXiv:2608.12103, 2026.</li>
-<li>T. Zussman, I. Zarkadas, A. Cidon et al. <em>Cache is King: Smart Page Eviction with eBPF</em> (cachebpf / cache_ext). arXiv:2502.02750, 2025.</li>
-<li><em>DuoServe-MoE: Dual-Phase Expert Prefetch and Caching for LLM Inference QoS Assurance.</em> arXiv:2509.07379, 2025.</li>
-<li><em>A Survey on Inference Optimization Techniques for Mixture of Experts Models.</em> arXiv:2412.14219, 2024.</li>
-<li>L. A. Belady. <em>A study of replacement algorithms for a virtual-storage computer.</em> IBM Systems Journal 5(2), 1966.</li>
-<li>R. L. Mattson, J. Gecsei, D. R. Slutz, I. L. Traiger. <em>Evaluation techniques for storage hierarchies.</em> IBM Systems Journal 9(2), 1970.</li>
-<li>llama.cpp (ggml-org): source at commit 970b51c (<code>src/llama-mmap.cpp</code>, <code>src/llama-model-loader.cpp</code>, <code>ggml/src/ggml-cpu/repack.cpp</code>); PRs #25294, #26824, #29887, #29250; issue #20757; discussion #27149. https://github.com/ggml-org/llama.cpp</li>
-<li>Linux kernel: <code>mm/readahead.c</code> (<code>force_page_cache_ra</code>), <code>include/trace/events/filemap.h</code>; man pages <code>mincore(2)</code>, <code>posix_fadvise(2)</code>, <code>madvise(2)</code>, <code>process_madvise(2)</code>, <code>cachestat(2)</code>.</li>
-<li>GGUF model files: allenai/OLMoE-1B-7B-0924-GGUF, unsloth/Qwen3-30B-A3B-GGUF, ggml-org/gpt-oss-20b-GGUF (Hugging Face).</li>
-</ol></body></html>
+<p>References are numbered in order of first citation. arXiv identifiers
+are given for every preprint; where a peer-reviewed version is known, its
+venue is listed first.</p>
+<p>[1] ggml-org, "llama.cpp: LLM inference in C/C++," source code, commit 970b51c (Oct. 2026); files <code>src/llama-mmap.cpp</code>, <code>src/llama-model-loader.cpp</code>, <code>ggml/src/ggml-cpu/repack.cpp</code>. [Online]. Available: https://github.com/ggml-org/llama.cpp</p>
+<p>[2] ggml-org, "GGUF," file format specification, <code>docs/gguf.md</code> in the ggml repository. [Online]. Available: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md</p>
+<p>[3] The Linux man-pages project, <code>mincore(2)</code>, <code>posix_fadvise(2)</code>, <code>madvise(2)</code>, <code>process_madvise(2)</code>, <code>mlock(2)</code>, <code>cachestat(2)</code>. [Online]. Available: https://man7.org/linux/man-pages/</p>
+<p>[4] The Linux Kernel Documentation, "Control Group v2." [Online]. Available: https://docs.kernel.org/admin-guide/cgroup-v2.html</p>
+<p>[5] The Linux Kernel Documentation, "Multi-Gen LRU." [Online]. Available: https://docs.kernel.org/admin-guide/mm/multigen_lru.html</p>
+<p>[6] N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, and J. Dean, "Outrageously large neural networks: The sparsely-gated mixture-of-experts layer," in <em>Proc. Int. Conf. Learning Representations (ICLR)</em>, 2017, arXiv:1701.06538.</p>
+<p>[7] W. Fedus, B. Zoph, and N. Shazeer, "Switch Transformers: Scaling to trillion parameter models with simple and efficient sparsity," <em>J. Mach. Learn. Res.</em>, vol. 23, no. 120, pp. 1–39, 2022, arXiv:2101.03961.</p>
+<p>[8] N. Muennighoff <em>et al.</em>, "OLMoE: Open mixture-of-experts language models," arXiv:2409.02060, 2024.</p>
+<p>[9] OpenAI, "gpt-oss-120b &amp; gpt-oss-20b model card," arXiv:2508.10925, 2025.</p>
+<p>[10] A. Yang <em>et al.</em>, "Qwen3 technical report," arXiv:2505.09388, 2025.</p>
+<p>[11] Model files on Hugging Face: allenai/OLMoE-1B-7B-0924-GGUF, ggml-org/gpt-oss-20b-GGUF, unsloth/Qwen3-30B-A3B-GGUF. [Online]. Available: https://huggingface.co</p>
+<p>[12] Linux kernel source, v6.19: <code>mm/readahead.c</code> (<code>force_page_cache_ra</code>, <code>page_cache_sync_ra</code>), <code>mm/filemap.c</code> (fault read-around), <code>include/trace/events/filemap.h</code>. [Online]. Available: https://git.kernel.org</p>
+<p>[13] A. Eliseev and D. Mazur, "Fast inference of mixture-of-experts language models with offloading," arXiv:2312.17238, 2023.</p>
+<p>[14] L. Xue, Y. Fu, Z. Lu, L. Mai, and M. Marina, "MoE-Infinity: Efficient MoE inference on personal machines with sparsity-aware expert cache," arXiv:2401.14361, 2024.</p>
+<p>[15] P. Tang, J. Liu, X. Hou, Y. Pu, J. Wang, P.-A. Heng, C. Li, and M. Guo, "HOBBIT: A mixed precision expert offloading system for fast MoE inference," arXiv:2411.01433, 2024.</p>
+<p>[16] R. Hwang, J. Wei, S. Cao, C. Hwang, X. Tang, T. Cao, and M. Yang, "Pre-gated MoE: An algorithm-system co-design for fast and scalable mixture-of-expert inference," arXiv:2308.12066, 2023.</p>
+<p>[17] Y. Zhang, G. Pinkert, N. Yang, Y. Li, and D. Yuan, "DuoServe-MoE: Dual-phase expert prefetch and caching for LLM inference QoS assurance," arXiv:2509.07379, 2025.</p>
+<p>[18] J. Liu, P. Tang, W. Wang, Y. Ren, X. Hou, P.-A. Heng, M. Guo, and C. Li, "A survey on inference optimization techniques for mixture of experts models," <em>ACM Comput. Surv.</em>, 2026, doi:10.1145/3794845, arXiv:2412.14219.</p>
+<p>[19] ggml-org/llama.cpp, pull requests #25294, #26824, #29887 and #29250, issue #20757, discussion #27149. [Online]. Available: https://github.com/ggml-org/llama.cpp</p>
+<p>[20] Y. Si, Y. Lin, D. Li, and J. Zhang, "Who should own the expert cache? Kernel-managed tiering for trillion-parameter MoE inference," arXiv:2608.12103, 2026.</p>
+<p>[21] L. A. Belady, "A study of replacement algorithms for a virtual-storage computer," <em>IBM Syst. J.</em>, vol. 5, no. 2, pp. 78–101, 1966.</p>
+<p>[22] T. Zussman, I. Zarkadas, J. Carin, A. Cheng, H. Franke, J. Pfefferle, and A. Cidon, "Cache is king: Smart page eviction with eBPF," arXiv:2502.02750, 2025.</p>
+<p>[23] The Linux Kernel Documentation, "DAMON: Data Access MONitor." [Online]. Available: https://docs.kernel.org/admin-guide/mm/damon/index.html</p>
+<p>[24] D. Hoyte, "vmtouch: the Virtual Memory Toucher," source code. [Online]. Available: https://github.com/hoytech/vmtouch</p>
+<p>[25] K. Alizadeh, I. Mirzadeh, D. Belenko, K. Khatamifard, M. Cho, C. C. Del Mundo, M. Rastegari, and M. Farajtabar, "LLM in a flash: Efficient large language model inference with limited memory," in <em>Proc. 62nd Annu. Meeting Assoc. Comput. Linguistics (ACL)</em>, 2024, arXiv:2312.11514.</p>
+<p>[26] Y. Song, Z. Mi, H. Xie, and H. Chen, "PowerInfer: Fast large language model serving with a consumer-grade GPU," in <em>Proc. ACM SIGOPS 30th Symp. Operating Systems Principles (SOSP)</em>, 2024, arXiv:2312.12456.</p>
+<p>[27] R. L. Mattson, J. Gecsei, D. R. Slutz, and I. L. Traiger, "Evaluation techniques for storage hierarchies," <em>IBM Syst. J.</em>, vol. 9, no. 2, pp. 78–117, 1970.</p>
+<p>[28] P. M. Fenwick, "A new data structure for cumulative frequency tables," <em>Softw.: Pract. Exper.</em>, vol. 24, no. 3, pp. 327–336, 1994.</p>
+<p>[29] The Linux Kernel Documentation, "PSI — Pressure Stall Information." [Online]. Available: https://docs.kernel.org/accounting/psi.html</p></body></html>
