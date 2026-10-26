@@ -2,11 +2,13 @@
 
 ## 2.1 Background
 
-Mixture-of-Experts (MoE) language models replace each dense feed-forward
-block with many smaller "expert" networks plus a router. For every token,
+Mixture-of-Experts (MoE) language models [@shazeer; @fedus] replace each
+dense feed-forward block with many smaller "expert" networks plus a
+router. For every token,
 the router picks a few experts per layer (top-k), so only a small fraction
-of the parameters is used per token. In the three models studied here
-(values read from the real model file headers):
+of the parameters is used per token. In the three models studied here,
+OLMoE [@olmoe], gpt-oss [@gptoss] and Qwen3 [@qwen3] (values read from
+the real model file headers [@hfmodels]):
 
 | Model | File (quantisation) | Size | Layers × experts | top-k | Expert share of file |
 |---|---|---|---|---|---|
@@ -16,14 +18,15 @@ of the parameters is used per token. In the three models studied here
 
 Because only 4–8 experts per layer are touched per token, MoE models are an
 attractive fit for consumer machines. A common way to run a model larger
-than free RAM is llama.cpp in `mmap` mode: the model file is mapped into
+than free RAM is llama.cpp [@llamacpp] in `mmap` mode: the model file is mapped into
 memory, and the Linux page cache loads weights on demand and evicts them
 under memory pressure.
 
 ## 2.2 Problem statement
 
-The kernel's page cache is generic. Its reclaim policy (MGLRU) and its
-fault read-around know nothing about how a GGUF file is laid out or how MoE
+The kernel's page cache is generic. Its reclaim policy (MGLRU [@mglru])
+and its fault read-around [@readahead] know nothing about how a GGUF file
+[@gguf] is laid out or how MoE
 routing behaves. Our measurements on a 15 GB laptop (Section 6) show three
 concrete problems:
 
@@ -60,36 +63,40 @@ weights.
 **MoE offloading inside the inference engine.** Most systems that keep
 only part of an MoE model in fast memory are built into the engine, where
 the router's decisions are directly visible:
-- mixtral-offloading (Eliseev & Mazur, 2023): LRU expert cache plus
-  speculative prefetch.
-- MoE-Infinity (Xue et al., 2024): activation-aware expert cache.
-- HOBBIT (2024): mixed-precision experts, implemented as about 8,000 lines
-  added to llama.cpp.
-- Pre-gated MoE, ProMoE, DuoServe-MoE, Fate and similar: predict
-  next-layer experts and prefetch them.
+- mixtral-offloading (Eliseev and Mazur [@eliseev]): LRU expert cache
+  plus speculative prefetch.
+- MoE-Infinity (Xue et al. [@moeinf]): activation-aware expert cache.
+- HOBBIT (Tang et al. [@hobbit]): mixed-precision experts, implemented as
+  about 8,000 lines added to llama.cpp.
+- Pre-gated MoE [@pregated], DuoServe-MoE [@duoserve] and similar
+  systems: predict next-layer experts and prefetch them. Liu et al.
+  [@survey] survey this design space.
 
-Inside llama.cpp itself there are several open proposals: PR #25294
-(O_DIRECT expert streaming that bypasses the page cache), PR #26824 (expert
-heat map and mmap pinning), PR #29887, issue #20757 and discussion #27149.
-All of these modify the engine.
+Inside llama.cpp itself there are several open proposals [@llamaprs]:
+PR #25294 (O_DIRECT expert streaming that bypasses the page cache),
+PR #26824 (expert heat map and mmap pinning), PR #29887, issue #20757 and
+discussion #27149. All of these modify the engine.
 
-**Using the OS page cache as the expert tier.** Si et al. (arXiv
-2608.12103, 2026) is the closest study. On a datacenter GH200 node they
+**Using the OS page cache as the expert tier.** Si et al. [@si2026] is
+the closest study. On a datacenter GH200 node they
 show that kernel recency (LRU) serves about as much demand as an oracle
-static-frequency pin, that Belady's bound leaves about one third of LRU's
+static-frequency pin, that Belady's bound [@belady] leaves about one third of LRU's
 misses addressable, and that `fadvise(WILLNEED)` prefetch hints gained only
 0.3–5 %. Their engine reads with `pread`, so mmap fault behaviour and file
 structure play no role.
 
 **Operating-system mechanisms.**
-- cache_ext / cachebpf (Zussman et al., 2025) lets eBPF programs replace
-  page-cache eviction, but needs a patched kernel.
-- MGLRU and DAMON are generic and know nothing of model structure.
-- vmtouch pins or evicts file ranges given by the user.
-- "LLM in a flash" (Alizadeh et al., Apple, 2024) and PowerInfer-2 bundle
-  co-used weights to make flash reads large. That is the same idea as our
-  expert-completion readahead, but those systems implement it inside the
-  engine and require reformatting the model.
+- cache_ext / cachebpf (Zussman et al. [@cacheext]) lets eBPF programs
+  replace page-cache eviction, but needs a patched kernel.
+- MGLRU [@mglru] and DAMON [@damon] are generic and know nothing of model
+  structure.
+- vmtouch [@vmtouch] pins or evicts file ranges given by the user.
+- "LLM in a flash" (Alizadeh et al. [@llminflash]) bundles co-used
+  weights so that flash reads are large. That is the same idea as our
+  expert-completion readahead, but it is implemented inside the engine and
+  requires reformatting the model. PowerInfer [@powerinfer] similarly
+  exploits activation locality inside the engine, keeping frequently
+  activated ("hot") neurons in fast memory.
 
 **Gap.** We found no system that manages the page cache for an
 *unmodified* engine using the *model file's structure*, and none that

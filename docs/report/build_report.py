@@ -1,17 +1,57 @@
 #!/usr/bin/env python3
 """Assemble docs/report/sections/*.md into REPORT.md and REPORT.html (for PDF)."""
+import re
+import sys
 from pathlib import Path
 
 import markdown
 
 here = Path(__file__).parent
+sys.path.insert(0, str(here))
+from references import REFS  # noqa: E402
+
 parts = [p.read_text() for p in sorted((here / "sections").glob("*.md"))]
 md = "\n\n".join(parts)
-# Python-Markdown nests lists only at 4-space indents; the sections use 2.
-md = "\n".join(
-    (" " * (2 * (len(line) - len(line.lstrip(" "))))) + line.lstrip(" ") if line.startswith("  ") else line
-    for line in md.split("\n")
+
+# Citations: [@a] or [@a; @b] -> IEEE numbers in order of first citation.
+order: dict[str, int] = {}
+
+
+def cite(m: re.Match) -> str:
+    keys = [k.strip().lstrip("@") for k in m.group(1).split(";")]
+    for k in keys:
+        if k not in REFS:
+            sys.exit(f"unknown citation key: {k}")
+        order.setdefault(k, len(order) + 1)
+    return "[" + ", ".join(str(order[k]) for k in keys) + "]"
+
+
+md = re.sub(r"\[(@[\w-]+(?:;\s*@[\w-]+)*)\]", cite, md)
+unused = sorted(set(REFS) - set(order))
+if unused:
+    sys.exit(f"references never cited: {', '.join(unused)}")
+md = md.replace(
+    "<!-- REFERENCES -->", "\n\n".join(f"[{n}] {REFS[k]}" for k, n in order.items())
 )
+# Python-Markdown nests lists only at 4-space indents; the sections use 2.
+# Lines inside top-level ``` fences are left alone.
+out, fenced = [], False
+for line in md.split("\n"):
+    if line.startswith("```"):
+        fenced = not fenced
+    elif line.startswith("  ") and not fenced:
+        line = " " * (2 * (len(line) - len(line.lstrip(" ")))) + line.lstrip(" ")
+    # Python-Markdown needs a blank line between a paragraph and a list.
+    elif (
+        re.match(r"(- |\d+\. )", line)
+        and out
+        and out[-1].strip()
+        and not re.match(r"(\s|- |\d+\. |\|)", out[-1])
+        and not fenced
+    ):
+        out.append("")
+    out.append(line)
+md = "\n".join(out)
 (here / "REPORT.md").write_text(md)
 body = markdown.markdown(md, extensions=["tables", "fenced_code"])
 css = """
@@ -27,7 +67,7 @@ th, td { border: 1px solid #c9c8c3; padding: 3px 6px; vertical-align: top; }
 th { background: #eef3fb; }
 img { max-width: 100%; display: block; margin: 8px auto; page-break-inside: avoid; }
 code { font-family: 'Liberation Mono', monospace; font-size: 9pt; background: #f3f2ef; padding: 0 2px; }
-pre { background: #f3f2ef; padding: 6px; font-size: 8.5pt; overflow-x: auto; }
+pre { background: #f3f2ef; padding: 6px; font-size: 8.2pt; white-space: pre-wrap; page-break-inside: avoid; }
 em { color: #444; }
 """
 html = f"<!doctype html><html><head><meta charset='utf-8'><title>moepager report</title><style>{css}</style></head><body>{body}</body></html>"

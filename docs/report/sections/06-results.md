@@ -7,8 +7,8 @@
 | Machine | Laptop, Intel i5-12450H (8 cores / 12 threads, AVX2), 15 GiB RAM + 8 GiB zram swap, desktop session running |
 | Storage | Solidigm P41 Plus 512 GB NVMe (PCIe 4, QLC); `/home` is btrfs with `compress=zstd:1`; btrfs readahead window 4 MiB |
 | OS | Fedora 42, Linux 6.19.14, MGLRU enabled |
-| Engine | llama.cpp commit 970b51c (2026-10-22), CPU only, 8 threads |
-| Model | OLMoE-1B-7B-0924 Q4_K_M (4.21 GB; 16 layers × 64 experts, top-8; experts 3.90 GB, units ≈ 3.8 MB) |
+| Engine | llama.cpp [@llamacpp] commit 970b51c (2026-10-22), CPU only, 8 threads |
+| Model | OLMoE-1B-7B-0924 [@olmoe] Q4_K_M (4.21 GB; 16 layers × 64 experts, top-8; experts 3.90 GB, units ≈ 3.8 MB) |
 | Memory budget | cgroup v2 `memory.max` = 1.5 GB or 2.5 GB, swap off unless stated; daemon and engine in the same cgroup |
 | Cold start | model evicted from the page cache before every run |
 
@@ -70,16 +70,24 @@ The prose trace was replayed on the real model file through `mmap`, with 4
 threads touching each expert's pages, under the memory wall. The trace
 needs 0.49 GB of expert data per token.
 
-| Budget | Variant | tokens/s | SSD read / token | Major faults / token |
+"Data read" is the page-cache inflow charged to the run's cgroup:
+reclaimed pages (`pgsteal`) plus file pages still charged at exit
+(Section 4.9). It includes the reads moepagerd issues on the engine's
+behalf. An earlier version of this table used the replayer's own
+`/proc/self/io`, which leaves out the daemon's reads and so understated
+traffic for the two daemon variants; on the four daemon-free runs the two
+counters agree to within 0.001 GB/token.
+
+| Budget | Variant | tokens/s | Data read / token (incl. daemon) | Major faults / token |
 |---|---|---|---|---|
 | 1.5 GB | kernel default | 0.79 | **1.80 GB** | 956 |
 | 1.5 GB | read-around off (`MADV_RANDOM`) | 0.75 | **0.16 GB** | 38,802 |
-| 1.5 GB | + moepagerd (read-around on) | 0.66 | 1.61 GB | 881 |
-| 1.5 GB | **read-around off + moepagerd** | **2.58** | 0.05 GB | 12,342 |
+| 1.5 GB | + moepagerd (read-around on) | 0.66 | 2.23 GB | 881 |
+| 1.5 GB | **read-around off + moepagerd** | **2.58** | 0.15 GB | 12,342 |
 | 2.5 GB | kernel default | 3.25 | 0.37 GB | 338 |
 | 2.5 GB | read-around off | **5.81** | 0.02 GB | 5,704 |
-| 2.5 GB | + moepagerd (read-around on) | 2.82 | 0.36 GB | 321 |
-| 2.5 GB | read-around off + moepagerd | 2.48 | 0.05 GB | 12,641 |
+| 2.5 GB | + moepagerd (read-around on) | 2.82 | 0.49 GB | 321 |
+| 2.5 GB | read-around off + moepagerd | 2.48 | 0.15 GB | 12,641 |
 
 ![Replay](fig-replay.png)
 
@@ -207,23 +215,23 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
 
 - **Replay (B), prose trace, 1.27 GB of experts per token:**
 
-| Budget | Variant | tokens/s | SSD read / token |
+| Budget | Variant | tokens/s | Data read / token (incl. daemon) |
 |---|---|---|---|
 | 4 GB | kernel default | 1.05 | 1.33 GB |
 | 4 GB | read-around off | 0.49 | 0.30 GB |
-| 4 GB | + moepagerd (read-around on) | 1.11 | 0.73 GB |
-| 4 GB | **read-around off + moepagerd** | **1.64** | **0.07 GB** |
+| 4 GB | + moepagerd (read-around on) | 1.11 | 1.12 GB |
+| 4 GB | **read-around off + moepagerd** | **1.64** | **0.31 GB** |
 | 6 GB | kernel default | 2.68 | 0.36 GB |
 | 6 GB | read-around off | 1.24 | 0.12 GB |
-| 6 GB | + moepagerd (read-around on) | 3.27 | 0.25 GB |
-| 6 GB | **read-around off + moepagerd** | **5.47** | **0.02 GB** |
+| 6 GB | + moepagerd (read-around on) | 3.27 | 0.36 GB |
+| 6 GB | **read-around off + moepagerd** | **5.47** | **0.11 GB** |
 
 ![gpt-oss replay](fig-replay-gptoss.png)
 
 **Reading:**
 - The best configuration is the same as for OLMoE: read-around off plus
   completion readahead, **1.6× and 2.0× faster** than the kernel default,
-  with **15–20× less SSD traffic**.
+  with **3–4× less data read** (0.31 vs 1.33 and 0.11 vs 0.36 GB/token).
 - Two differences from OLMoE:
   - gpt-oss's expert slices (4.4 MB) are about as large as the read-around
     window, so read-around wastes less (≈ 1.05× at 4 GB).
@@ -242,12 +250,13 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
 | (not anticipated) | Fault read-around pollution is the dominant cost: 3.7–4.8× read amplification. Turning it off is required for both correctness of black-box detection and speed. |
 
 **Relation to existing methods:**
-- Si et al. found that `fadvise` lookahead hints gain ≤ 5 % on a GH200
+- Si et al. [@si2026] found that `fadvise` lookahead hints gain ≤ 5 % on a GH200
   with a `pread`-based engine. Our result differs because on an
   mmap-based engine the problem is *how* missing experts are read (small
   synchronous faults plus large wasted read-around), not *which* experts
   to keep. Completion readahead attacks exactly that.
-- In-engine systems (MoE-Infinity, HOBBIT, llama.cpp PR #25294) see router
+- In-engine systems (MoE-Infinity [@moeinf], HOBBIT [@hobbit], llama.cpp
+  PR #25294 [@llamaprs]) see router
   decisions directly and can avoid the issue entirely. moepager reaches a
   3.7–4.0× improvement over the stock page-cache path without modifying
   the engine's code or binary, at the cost of one `LD_PRELOAD` hint.

@@ -63,22 +63,15 @@ On a real model (OLMoE-1B-7B) on a 15 GB laptop, the outcome was:
    longer runs.
 3. Evaluate pinning end to end with `CAP_IPC_LOCK` and a pin budget near
    90 % of the expert cache. Narrow the miss-only gap with privileged hit
-   observation (DAMON) where available.
+   observation (DAMON [@damon]) where available.
 4. Add a fallback when WILLNEED is ineffective (`MADV_POPULATE_READ`), and
-   PSI-driven control of the memory budget to protect other applications.
+   PSI-driven [@psi] control of the memory budget to protect other
+   applications.
 
 # 8. References
 
-1. A. Eliseev, D. Mazur. *Fast Inference of Mixture-of-Experts Language Models with Offloading.* arXiv:2312.17238, 2023.
-2. L. Xue et al. *MoE-Infinity: Efficient MoE Inference on Personal Machines with Sparsity-Aware Expert Cache.* arXiv:2401.14361, 2024.
-3. *HOBBIT: A Mixed Precision Expert Offloading System for Fast MoE Inference.* arXiv:2411.01433, 2024.
-4. K. Alizadeh et al. *LLM in a flash: Efficient Large Language Model Inference with Limited Memory.* ACL 2024 (arXiv:2312.11514).
-5. Y. Si, Y. Lin, D. Li, J. Zhang. *Who Should Own the Expert Cache? Kernel-Managed Tiering for Trillion-Parameter MoE Inference.* arXiv:2608.12103, 2026.
-6. T. Zussman, I. Zarkadas, A. Cidon et al. *Cache is King: Smart Page Eviction with eBPF* (cachebpf / cache_ext). arXiv:2502.02750, 2025.
-7. *DuoServe-MoE: Dual-Phase Expert Prefetch and Caching for LLM Inference QoS Assurance.* arXiv:2509.07379, 2025.
-8. *A Survey on Inference Optimization Techniques for Mixture of Experts Models.* arXiv:2412.14219, 2024.
-9. L. A. Belady. *A study of replacement algorithms for a virtual-storage computer.* IBM Systems Journal 5(2), 1966.
-10. R. L. Mattson, J. Gecsei, D. R. Slutz, I. L. Traiger. *Evaluation techniques for storage hierarchies.* IBM Systems Journal 9(2), 1970.
-11. llama.cpp (ggml-org): source at commit 970b51c (`src/llama-mmap.cpp`, `src/llama-model-loader.cpp`, `ggml/src/ggml-cpu/repack.cpp`); PRs #25294, #26824, #29887, #29250; issue #20757; discussion #27149. https://github.com/ggml-org/llama.cpp
-12. Linux kernel: `mm/readahead.c` (`force_page_cache_ra`), `include/trace/events/filemap.h`; man pages `mincore(2)`, `posix_fadvise(2)`, `madvise(2)`, `process_madvise(2)`, `cachestat(2)`.
-13. GGUF model files: allenai/OLMoE-1B-7B-0924-GGUF, unsloth/Qwen3-30B-A3B-GGUF, ggml-org/gpt-oss-20b-GGUF (Hugging Face).
+References are numbered in order of first citation. arXiv identifiers
+are given for every preprint; where a peer-reviewed version is known, its
+venue is listed first.
+
+<!-- REFERENCES -->
