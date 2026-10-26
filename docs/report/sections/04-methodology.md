@@ -11,6 +11,8 @@ named in each heading.
 
 ## 4.1 Problem model and notation
 
+Table: Notation.
+
 | Symbol | Meaning |
 |---|---|
 | F, P | the GGUF model file; the page size (4 KiB on the test machine) |
@@ -331,6 +333,8 @@ experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
 
 **Experiments.**
 
+Table: Experiments A–D.
+
 | | Question | Independent variables | Measured |
 |---|---|---|---|
 | **A** | How local and predictable is real routing; how much could any policy gain? | prompt domain (chat, code, prose); cache size 15–70 % of expert bytes; policy | reuse, concentration, next-layer recall; miss ratio per policy |
@@ -373,6 +377,8 @@ experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
   discarded and repeated.
 
 ## 4.9 Metric definitions
+
+Table: Metric definitions.
 
 | Metric | Definition | Source |
 |---|---|---|

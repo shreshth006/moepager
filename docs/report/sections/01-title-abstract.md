@@ -1,19 +1,14 @@
-# moepager
+<header class="paper-title" markdown="1">
+<p class="title">moepager: Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines</p>
+<p class="authors">Shreshth Mishra · Ayush Sinha</p>
+<p class="meta">Code, data and raw results: https://github.com/shreshth006/moepager</p>
+<p class="meta"><em>Formal title:</em> System and Method for Non-Invasive, Expert-Aware Page-Cache Management for Mixture-of-Experts Model Inference on Memory-Constrained Linux Hosts</p>
+</header>
 
-## Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines
+<!-- BODY -->
 
-**Formal title:** System and Method for Non-Invasive, Expert-Aware
-Page-Cache Management for Mixture-of-Experts Model Inference on
-Memory-Constrained Linux Hosts
-
-**Repository:** https://github.com/shreshth006/moepager · team fork:
-https://github.com/AyushSinha2210/moepager (branch `ayush`)
-
-# 1. Title, Abstract and Architecture
-
-## 1.1 Abstract
-
-Mixture-of-Experts (MoE) language models activate only a few "expert"
+<div class="abstract" markdown="1">
+<b><i>Abstract</i>—</b>Mixture-of-Experts (MoE) language models activate only a few "expert"
 sub-networks per layer for each token: 8 of 64 in OLMoE-1B-7B, 4 of 32 in
 gpt-oss-20b, 8 of 128 in Qwen3-30B-A3B. That makes them attractive for
 consumer machines, which run them with llama.cpp in `mmap` mode when the
@@ -63,7 +58,10 @@ We also report what did not work: a value-based pinning policy captured
 little of the optimal policy's 34–74 % miss reduction, and completion
 readahead without turning off read-around made performance worse.
 
-## 1.2 System architecture
+<p class="index-terms"><b><i>Index Terms</i>—</b>Mixture of experts, large language models, page cache, readahead, memory management, Linux, cgroups, llama.cpp.</p>
+</div>
+
+# 1. System Architecture
 
 moepager is a **user-space control loop around the Linux page cache**. It
 sits beside an unmodified inference engine, observes the engine only
@@ -72,11 +70,11 @@ interfaces. Figure 1 shows the whole system; the subsections below define
 its structure, components, interfaces, data model, runtime behaviour,
 process and privilege model, and the design decisions behind them.
 
-![moepager architecture](architecture-portrait.png)
+![moepager architecture](architecture.png)
 
-*Figure 1. moepager architecture (source: `docs/report/architecture-portrait.dot`; a landscape version is `architecture.png`).*
+*Figure: moepager architecture (source: `docs/report/architecture.dot`; a portrait version is `architecture-portrait.png`).*
 
-### 1.2.1 Architectural style
+## 1.1 Architectural style
 
 - **Layered, with ports and adapters.** Policy code is pure: it consumes
   observations and emits `Action` values, and never calls the kernel. All
@@ -112,7 +110,9 @@ below it):
                 cgroup v2, PSI
 ```
 
-### 1.2.2 Components and responsibilities
+## 1.2 Components and responsibilities
+
+Table: Components of moepager and their responsibilities.
 
 | Component | Language / size | Responsibility | Needs privilege |
 |---|---|---|---|
@@ -131,7 +131,7 @@ below it):
 | `python/moepager_tools` | Python | Result collection, report figures | no |
 | llama.cpp [@llamacpp] | external, unmodified | The inference engine; maps the model with `mmap` | no |
 
-### 1.2.3 Interfaces
+## 1.3 Interfaces
 
 The boundaries between layers are four Rust traits and one value type:
 
@@ -178,7 +178,9 @@ pub trait Controller {
   control files [@cgroup]; the `.mpt` trace format
   (`docs/TRACE_FORMAT.md`); the expert map as JSON (`map.json`).
 
-### 1.2.4 Data model
+## 1.4 Data model
+
+Table: Data model.
 
 | Entity | Fields | Notes |
 |---|---|---|
@@ -192,7 +194,7 @@ pub trait Controller {
 | `.mpt` file | magic `MPTRACE\0`, version, record kind, JSON header (model, observation regime, units), fixed-size records | expert records (16 B) or page records (24 B) |
 | `OnlineStats` | decayed counts and exposures per unit, layer-transition rows, layer time | the daemon's only state besides the pinned set |
 
-### 1.2.5 Runtime data flow
+## 1.5 Runtime data flow
 
 For each decoded token, with the recommended configuration (engine with
 `-nr` and the shim; daemon with `--policy v --budget-mb 0`):
@@ -222,7 +224,9 @@ Offline, `mp-gguf` produces the map used in steps 2–5. For evaluation,
 `moe_trace` replaces steps 2–3 with exact router output, and `mp-sim`
 replaces steps 1, 6 and 8 with a model of the cache and the I/O device.
 
-### 1.2.6 Process, privilege and memory view
+## 1.6 Process, privilege and memory view
+
+Table: Processes, model mappings and privileges at run time.
 
 | Process | Runs | Maps the model | Privilege |
 |---|---|---|---|
@@ -245,7 +249,9 @@ replaces steps 1, 6 and 8 with a model of the cache and the I/O device.
   plain kernel behaviour; every action is a hint, and pins are released
   when the daemon's mapping is closed.
 
-### 1.2.7 Key design decisions
+## 1.7 Key design decisions
+
+Table: Architecture decision records.
 
 | ADR | Decision | Reason |
 |---|---|---|

@@ -1,28 +1,66 @@
-<!doctype html><html><head><meta charset='utf-8'><title>moepager report</title><style>
-@page { size: A4; margin: 16mm 15mm; }
-body { font-family: 'Liberation Sans', Arial, sans-serif; font-size: 10.5pt; color: #111;
-       line-height: 1.42; max-width: 180mm; margin: auto; }
-h1 { font-size: 17pt; border-bottom: 2px solid #2a78d6; padding-bottom: 3px; margin-top: 22px;
-     page-break-after: avoid; }
-h2 { font-size: 13pt; margin-top: 16px; page-break-after: avoid; }
-h3 { font-size: 11.5pt; page-break-after: avoid; }
-table { border-collapse: collapse; margin: 8px 0; font-size: 8.8pt; page-break-inside: avoid; }
-th, td { border: 1px solid #c9c8c3; padding: 3px 6px; vertical-align: top; }
-th { background: #eef3fb; }
-img { max-width: 100%; display: block; margin: 8px auto; page-break-inside: avoid; }
-code { font-family: 'Liberation Mono', monospace; font-size: 9pt; background: #f3f2ef; padding: 0 2px; }
-pre { background: #f3f2ef; padding: 6px; font-size: 8.2pt; white-space: pre-wrap; page-break-inside: avoid; }
-em { color: #444; }
-</style></head><body><h1>moepager</h1>
-<h2>Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines</h2>
-<p><strong>Formal title:</strong> System and Method for Non-Invasive, Expert-Aware
-Page-Cache Management for Mixture-of-Experts Model Inference on
-Memory-Constrained Linux Hosts</p>
-<p><strong>Repository:</strong> https://github.com/shreshth006/moepager · team fork:
-https://github.com/AyushSinha2210/moepager (branch <code>ayush</code>)</p>
-<h1>1. Title, Abstract and Architecture</h1>
-<h2>1.1 Abstract</h2>
-<p>Mixture-of-Experts (MoE) language models activate only a few "expert"
+<!doctype html><html lang='en'><head><meta charset='utf-8'><title>moepager</title><style>
+@page { size: A4; margin: 18mm 15mm 20mm 15mm;
+        @bottom-center { content: counter(page); font: 9pt 'Nimbus Roman', 'Liberation Serif', serif; } }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { font-family: 'Nimbus Roman', 'Liberation Serif', 'Times New Roman', serif; font-size: 10pt;
+       line-height: 1.22; color: #000; background: #fff; margin: 0; }
+.paper-title { text-align: center; margin: 0 0 14pt; }
+.paper-title .title { font-size: 22pt; line-height: 1.15; margin: 0 6mm 10pt; }
+.paper-title .authors { font-size: 11pt; margin: 0 0 4pt; }
+.paper-title .meta { font-size: 8.5pt; margin: 0 0 2pt; }
+main { column-count: 2; column-gap: 6mm; text-align: justify; hyphens: auto; }
+p { margin: 0; text-indent: 1em; orphans: 2; widows: 2; }
+li p, td p, figcaption, .abstract p, .refs p, caption { text-indent: 0; }
+.abstract { font-size: 9pt; font-weight: bold; line-height: 1.2; }
+.abstract p { margin: 0 0 3pt; }
+.abstract ul, .abstract ol { margin: 0 0 3pt; }
+.abstract code { font-weight: normal; }
+.index-terms { font-size: 9pt; font-weight: bold; margin: 4pt 0 6pt !important; }
+h1 { font-size: 10pt; font-weight: normal; font-variant: small-caps; letter-spacing: 0.03em;
+     text-align: center; margin: 10pt 0 4pt; break-after: avoid; }
+h2 { font-size: 10pt; font-weight: normal; font-style: italic; text-align: left;
+     margin: 7pt 0 2pt; break-after: avoid; }
+h3 { font-size: 10pt; font-weight: normal; font-style: italic; margin: 5pt 0 1pt; break-after: avoid; }
+ul, ol { margin: 2pt 0 3pt; padding-left: 1.3em; }
+li { margin: 0 0 1pt; }
+li > ul, li > ol { margin: 1pt 0; }
+code { font-family: 'Liberation Mono', 'Nimbus Mono PS', monospace; font-size: 0.82em;
+       overflow-wrap: anywhere; hyphens: none; }
+pre { font-size: 7.4pt; line-height: 1.25; margin: 5pt 0; padding: 3pt 0;
+      border-top: 0.6pt solid #000; border-bottom: 0.6pt solid #000;
+      white-space: pre-wrap; text-align: left; break-inside: avoid; }
+pre code { font-size: 1em; }
+pre.long { break-inside: auto; }
+.paper-title p { text-indent: 0; }
+.span { column-span: all; }
+figure { margin: 6pt 0; text-align: center; break-inside: avoid; }
+figure img { max-width: 100%; display: block; margin: 0 auto 3pt; }
+figure.span img { max-height: 92mm; }
+figcaption { font-size: 8pt; text-align: justify; text-align-last: center; }
+.fno { font-weight: normal; }
+table { border-collapse: collapse; margin: 6pt auto 7pt; font-size: 7.6pt; line-height: 1.18;
+        text-align: left; break-inside: avoid; border-top: 1pt solid #000; border-bottom: 1pt solid #000; }
+table.span { width: 100%; font-size: 8pt; }
+table.narrow { width: 100%; }
+caption { caption-side: top; font-size: 8pt; text-align: center; padding-bottom: 4pt; }
+.tno { display: block; font-variant: small-caps; letter-spacing: 0.04em; font-size: 8.5pt; }
+.tcap { font-variant: small-caps; }
+th { font-weight: normal; font-style: italic; border-bottom: 0.6pt solid #000; padding: 2pt 4pt;
+     vertical-align: bottom; }
+td { padding: 1.5pt 4pt; vertical-align: top; }
+.refs { font-size: 8pt; line-height: 1.2; text-align: left; }
+.refs p { padding-left: 2.6em; text-indent: -2.6em; margin: 0 0 2pt; }
+a { color: inherit; text-decoration: none; }
+</style></head><body><header class="paper-title">
+<p class="title">moepager: Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines</p>
+<p class="authors">Shreshth Mishra · Ayush Sinha</p>
+<p class="meta">Code, data and raw results: https://github.com/shreshth006/moepager</p>
+<p class="meta"><em>Formal title:</em> System and Method for Non-Invasive, Expert-Aware Page-Cache Management for Mixture-of-Experts Model Inference on Memory-Constrained Linux Hosts</p>
+</header>
+<main>
+
+<div class="abstract">
+<p><b><i>Abstract</i>—</b>Mixture-of-Experts (MoE) language models activate only a few "expert"
 sub-networks per layer for each token: 8 of 64 in OLMoE-1B-7B, 4 of 32 in
 gpt-oss-20b, 8 of 128 in Qwen3-30B-A3B. That makes them attractive for
 consumer machines, which run them with llama.cpp in <code>mmap</code> mode when the
@@ -70,16 +108,17 @@ data read.</p>
 <p>We also report what did not work: a value-based pinning policy captured
 little of the optimal policy's 34–74 % miss reduction, and completion
 readahead without turning off read-around made performance worse.</p>
-<h2>1.2 System architecture</h2>
+<p class="index-terms"><b><i>Index Terms</i>—</b>Mixture of experts, large language models, page cache, readahead, memory management, Linux, cgroups, llama.cpp.</p>
+</div>
+<h1>1. System Architecture</h1>
 <p>moepager is a <strong>user-space control loop around the Linux page cache</strong>. It
 sits beside an unmodified inference engine, observes the engine only
 through the page cache they share, and acts only through standard kernel
 interfaces. Figure 1 shows the whole system; the subsections below define
 its structure, components, interfaces, data model, runtime behaviour,
 process and privilege model, and the design decisions behind them.</p>
-<p><img alt="moepager architecture" src="architecture-portrait.png" /></p>
-<p><em>Figure 1. moepager architecture (source: <code>docs/report/architecture-portrait.dot</code>; a landscape version is <code>architecture.png</code>).</em></p>
-<h3>1.2.1 Architectural style</h3>
+<figure class="span"><img src="architecture.png" alt="moepager architecture"><figcaption><span class="fno">Fig. 1.</span> moepager architecture (source: <code>docs/report/architecture.dot</code>; a portrait version is <code>architecture-portrait.png</code>).</figcaption></figure>
+<h2>1.1 Architectural style</h2>
 <ul>
 <li><strong>Layered, with ports and adapters.</strong> Policy code is pure: it consumes
     observations and emits <code>Action</code> values, and never calls the kernel. All
@@ -104,7 +143,7 @@ process and privilege model, and the design decisions behind them.</p>
 </ul>
 <p>The crate layers, from Cargo dependencies (each layer uses only layers
 below it):</p>
-<pre><code> L4  Front ends     moepager (CLI: gguf-map, synth, analyze, sim, record, replay, fault-io, …)
+<pre class="span"><code> L4  Front ends     moepager (CLI: gguf-map, synth, analyze, sim, record, replay, fault-io, …)
                     moepagerd (daemon)
  L3  Evaluation     mp-sim (simulator)   mp-analyze (reuse, MRC)   mp-synth (synthetic traces)
  L2  Policy core    mp-core: OnlineStats, CostModel, ResidencyEngine, Prefetcher -&gt; Action
@@ -114,8 +153,8 @@ below it):</p>
      Linux 6.x: page cache, mincore, posix_fadvise, madvise, mlock, process_madvise,
                 cgroup v2, PSI
 </code></pre>
-<h3>1.2.2 Components and responsibilities</h3>
-<table>
+<h2>1.2 Components and responsibilities</h2>
+<table class="span"><caption><span class="tno">Table I</span><span class="tcap">Components of moepager and their responsibilities.</span></caption>
 <thead>
 <tr>
 <th>Component</th>
@@ -211,9 +250,9 @@ below it):</p>
 </tr>
 </tbody>
 </table>
-<h3>1.2.3 Interfaces</h3>
+<h2>1.3 Interfaces</h2>
 <p>The boundaries between layers are four Rust traits and one value type:</p>
-<pre><code class="language-rust">/// mp-os: actuators on byte ranges of the model file (LinuxOps, MockOps).
+<pre class="span long"><code class="language-rust">/// mp-os: actuators on byte ranges of the model file (LinuxOps, MockOps).
 pub trait PageCacheOps {
     fn prefetch(&amp;mut self, offset: u64, len: u64) -&gt; io::Result&lt;()&gt;; // async readahead
     fn pin(&amp;mut self, offset: u64, len: u64) -&gt; io::Result&lt;()&gt;;      // resident + unevictable
@@ -255,8 +294,8 @@ pub trait Controller {
     control files [4]; the <code>.mpt</code> trace format
     (<code>docs/TRACE_FORMAT.md</code>); the expert map as JSON (<code>map.json</code>).</li>
 </ul>
-<h3>1.2.4 Data model</h3>
-<table>
+<h2>1.4 Data model</h2>
+<table class="span"><caption><span class="tno">Table II</span><span class="tcap">Data model.</span></caption>
 <thead>
 <tr>
 <th>Entity</th>
@@ -312,7 +351,7 @@ pub trait Controller {
 </tr>
 </tbody>
 </table>
-<h3>1.2.5 Runtime data flow</h3>
+<h2>1.5 Runtime data flow</h2>
 <p>For each decoded token, with the recommended configuration (engine with
 <code>-nr</code> and the shim; daemon with <code>--policy v --budget-mb 0</code>):</p>
 <ol>
@@ -340,8 +379,8 @@ pub trait Controller {
 <p>Offline, <code>mp-gguf</code> produces the map used in steps 2–5. For evaluation,
 <code>moe_trace</code> replaces steps 2–3 with exact router output, and <code>mp-sim</code>
 replaces steps 1, 6 and 8 with a model of the cache and the I/O device.</p>
-<h3>1.2.6 Process, privilege and memory view</h3>
-<table>
+<h2>1.6 Process, privilege and memory view</h2>
+<table class="span"><caption><span class="tno">Table III</span><span class="tcap">Processes, model mappings and privileges at run time.</span></caption>
 <thead>
 <tr>
 <th>Process</th>
@@ -382,8 +421,8 @@ replaces steps 1, 6 and 8 with a model of the cache and the I/O device.</p>
     plain kernel behaviour; every action is a hint, and pins are released
     when the daemon's mapping is closed.</li>
 </ul>
-<h3>1.2.7 Key design decisions</h3>
-<table>
+<h2>1.7 Key design decisions</h2>
+<table class="span"><caption><span class="tno">Table IV</span><span class="tcap">Architecture decision records.</span></caption>
 <thead>
 <tr>
 <th>ADR</th>
@@ -458,7 +497,7 @@ the router picks a few experts per layer (top-k), so only a small fraction
 of the parameters is used per token. In the three models studied here,
 OLMoE [8], gpt-oss [9] and Qwen3 [10] (values read from
 the real model file headers [11]):</p>
-<table>
+<table class="span"><caption><span class="tno">Table V</span><span class="tcap">The three MoE models studied (values from the GGUF headers).</span></caption>
 <thead>
 <tr>
 <th>Model</th>
@@ -599,7 +638,7 @@ experimental protocol, the metric definitions and the threats to validity.
 Every algorithm below corresponds to code in the repository; the crate is
 named in each heading.</p>
 <h2>4.1 Problem model and notation</h2>
-<table>
+<table class="span"><caption><span class="tno">Table VI</span><span class="tcap">Notation.</span></caption>
 <thead>
 <tr>
 <th>Symbol</th>
@@ -656,7 +695,7 @@ at most C bytes (minus the engine's anonymous memory). A unit access is a
 <strong>hit</strong> if all its pages are resident and a <strong>miss</strong> otherwise.</p>
 <p>The quantity to minimise is decode time per token. Under memory pressure
 it is dominated by I/O stall, which a simple cost model captures:</p>
-<pre><code>    stall(miss of u)  =  t_f + s_u / B_d               (kernel default)
+<pre class="span"><code>    stall(miss of u)  =  t_f + s_u / B_d               (kernel default)
     stall(miss of u)  =  t_f + t_detect + s_u / B_b     (with completion readahead)
 </code></pre>
 <p>Two levers follow directly. <strong>Residency</strong> (which units stay cached)
@@ -672,7 +711,7 @@ truncated prefix of the file is enough. For each tensor named
 <code>blk.&lt;l&gt;.ffn_{up,gate,down,gate_up}_exps.weight</code> with shape
 <code>[ne0, ne1, E]</code>, the expert index is the outermost (slowest-varying)
 dimension, so each expert's weights are contiguous inside the tensor:</p>
-<pre><code>Algorithm 1  BuildExpertMap(header)
+<pre class="span"><code>Algorithm 1  BuildExpertMap(header)
   for each tensor T matching blk.&lt;l&gt;.ffn_*_exps.*:
       bytes  := type_size(T.type) * (ne0 * ne1 * E) / block_size(T.type)
       stride := bytes / E                       # warn if E does not divide bytes
@@ -719,7 +758,7 @@ to be correct as well as fast.</p>
 calls <code>mincore(2)</code> [3] on the sentinel pages. This needs no
 privilege and works for files the daemon does not own. (<code>cachestat(2)</code>
 would need write access to the file.)</p>
-<pre><code>Algorithm 2  SentinelTick(sentinels, prev, now_ns)       # every Δ = 300 µs
+<pre class="span"><code>Algorithm 2  SentinelTick(sentinels, prev, now_ns)       # every Δ = 300 µs
   events := []
   for i, s in enumerate(sentinels):
       r := mincore(s.page)
@@ -750,7 +789,7 @@ would need write access to the file.)</p>
 are visited in increasing order, so a new token is inferred when an event's
 layer falls more than a slack (default 2 layers) below the highest layer
 seen in the current step:</p>
-<pre><code>Algorithm 3  InferToken(event)                             # ADR 0010
+<pre class="span"><code>Algorithm 3  InferToken(event)                             # ADR 0010
   if max_layer is set and event.layer + slack &lt; max_layer:
       end_token()                       # closes statistics, may trigger re-plan
   max_layer := max(max_layer, event.layer)
@@ -785,7 +824,7 @@ to read <strong>all</strong> of u asynchronously. The engine is typically still 
 the first slice (<code>up</code>); the <code>gate</code> and <code>down</code> slices, hundreds of
 megabytes away in the file, arrive as large reads instead of thousands of
 small faults.</p>
-<pre><code>Algorithm 4  OnMiss(u)                                     # mp-core::prefetch
+<pre class="span"><code>Algorithm 4  OnMiss(u)                                     # mp-core::prefetch
   for each slice [a, b) in S(u):
       for c in a, a+128K, a+256K, ... &lt; b:                  # chunked (ADR 0006)
           posix_fadvise(fd, c, min(128K, b - c), POSIX_FADV_WILLNEED)
@@ -823,7 +862,7 @@ small faults.</p>
 units with <code>mlock</code> through its own shared mapping, which pins the same
 page-cache folios the engine reads. The policy chooses a pinned set
 within a pin budget C_pin ≤ C by <strong>value per byte</strong>:</p>
-<pre><code>    V(u) = rate(u) · (t_f + s_u / B_d) / s_u
+<pre class="narrow"><code>    V(u) = rate(u) · (t_f + s_u / B_d) / s_u
 </code></pre>
 <p>that is, the expected stall avoided per token per byte held. This is a
 fractional-knapsack relaxation; the greedy order is optimal for the
@@ -831,7 +870,7 @@ relaxation and near-optimal when units are small compared with C_pin.</p>
 <p><strong>Rate estimator under miss-only observation.</strong> A pinned unit produces no
 misses, so naive miss counts would make every pinned unit look cold.
 rate(u) is instead defined as the <strong>miss rate per token while unpinned</strong>:</p>
-<pre><code>    rate(u) = (Σ_t w_t · miss_t(u) + p·k) / (Σ_{t: u unpinned at t} w_t + k)
+<pre class="span"><code>    rate(u) = (Σ_t w_t · miss_t(u) + p·k) / (Σ_{t: u unpinned at t} w_t + k)
 </code></pre>
 <ul>
 <li>w_t = g^t with g = 2^{1/h} is an exponential decay weight with half-life
@@ -844,7 +883,7 @@ rate(u) is instead defined as the <strong>miss rate per token while unpinned</st
     2 % of pinned units are released ("exploration") so frozen estimates
     are refreshed.</li>
 </ul>
-<pre><code>Algorithm 5  Replan(stats, cost)                  # every 4 tokens (replan_every)
+<pre class="span"><code>Algorithm 5  Replan(stats, cost)                  # every 4 tokens (replan_every)
   excluded := random 2 % of pinned units          # exploration, miss-only only
   cand := [(V(u) * (1.25 if pinned[u] else 1), u) for u not excluded, V(u) &gt; 0]
   sort cand by value descending                   # hysteresis factor 1.25
@@ -892,7 +931,7 @@ set keyed by next use, so each access costs O(log N).</p>
 the simulator, the miss ratio of a byte-capacity LRU cache at <em>every</em>
 capacity in one pass, using stack-distance analysis [27] with a
 Fenwick tree [28]:</p>
-<pre><code>Algorithm 6  ByteReuseDistances(σ)
+<pre class="span"><code>Algorithm 6  ByteReuseDistances(σ)
   fenwick := zeros(N)                      # one slot per trace position
   for i, u in enumerate(σ):
       if last[u] exists:
@@ -922,7 +961,7 @@ experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
     memory → the approach has no user.</li>
 </ul>
 <p><strong>Experiments.</strong></p>
-<table>
+<table class="span"><caption><span class="tno">Table VII</span><span class="tcap">Experiments A–D.</span></caption>
 <thead>
 <tr>
 <th></th>
@@ -995,7 +1034,7 @@ experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
     discarded and repeated.</li>
 </ul>
 <h2>4.9 Metric definitions</h2>
-<table>
+<table class="span"><caption><span class="tno">Table VIII</span><span class="tcap">Metric definitions.</span></caption>
 <thead>
 <tr>
 <th>Metric</th>
@@ -1102,7 +1141,7 @@ extrapolated.</p>
 </ul>
 <h1>5. Implementation</h1>
 <h2>5.1 Technology stack and structure</h2>
-<table>
+<table class="span"><caption><span class="tno">Table IX</span><span class="tcap">Technology stack.</span></caption>
 <thead>
 <tr>
 <th>Layer</th>
@@ -1153,7 +1192,7 @@ extrapolated.</p>
 </tr>
 </tbody>
 </table>
-<table>
+<table class="span"><caption><span class="tno">Table X</span><span class="tcap">Rust crates and their responsibilities.</span></caption>
 <thead>
 <tr>
 <th>Crate</th>
@@ -1204,7 +1243,7 @@ extrapolated.</p>
 </tbody>
 </table>
 <h2>5.2 Functional completeness</h2>
-<table>
+<table class="span"><caption><span class="tno">Table XI</span><span class="tcap">Functional completeness.</span></caption>
 <thead>
 <tr>
 <th>Feature</th>
@@ -1299,21 +1338,15 @@ daemon dry run, and records a replayed trace black-box. With a model,
 <code>bench/phase7.sh</code> runs experiments A–D. Terminal screenshots of the tools
 on the real OLMoE model follow.</p>
 <h2>5.5 Screenshots (real output on OLMoE-1B-7B)</h2>
-<p><img alt="gguf-map" src="screens/01-gguf-map.png" />
-<em>Figure 2. Expert map from the real GGUF header, with the repack warning for this AVX2 CPU.</em></p>
-<p><img alt="moe_trace" src="screens/05-moe-trace.png" />
-<em>Figure 3. Ground-truth routing capture through llama.cpp's eval callback.</em></p>
-<p><img alt="import + analyze" src="screens/02-import-analyze.png" />
-<em>Figure 4. Importing the routing trace and analyzing it: reuse, predictability, exact LRU curve.</em></p>
-<p><img alt="sim" src="screens/03-sim.png" />
-<em>Figure 5. Policy simulation, including the Belady* bound.</em></p>
-<p><img alt="phase 7" src="screens/06-phase7-d.png" />
-<em>Figure 6. Collected end-to-end results (B0S rows are OOM-killed runs), daemon counters, and the shim at work.</em></p>
-<p><img alt="tests" src="screens/04-tests.png" />
-<em>Figure 7. Test and lint status.</em></p>
+<figure class="span"><img src="screens/01-gguf-map.png" alt="gguf-map"><figcaption><span class="fno">Fig. 2.</span> Expert map from the real GGUF header, with the repack warning for this AVX2 CPU.</figcaption></figure>
+<figure class="span"><img src="screens/05-moe-trace.png" alt="moe_trace"><figcaption><span class="fno">Fig. 3.</span> Ground-truth routing capture through llama.cpp's eval callback.</figcaption></figure>
+<figure class="span"><img src="screens/02-import-analyze.png" alt="import + analyze"><figcaption><span class="fno">Fig. 4.</span> Importing the routing trace and analyzing it: reuse, predictability, exact LRU curve.</figcaption></figure>
+<figure class="span"><img src="screens/03-sim.png" alt="sim"><figcaption><span class="fno">Fig. 5.</span> Policy simulation, including the Belady* bound.</figcaption></figure>
+<figure class="span"><img src="screens/06-phase7-d.png" alt="phase 7"><figcaption><span class="fno">Fig. 6.</span> Collected end-to-end results (B0S rows are OOM-killed runs), daemon counters, and the shim at work.</figcaption></figure>
+<figure class="span"><img src="screens/04-tests.png" alt="tests"><figcaption><span class="fno">Fig. 7.</span> Test and lint status.</figcaption></figure>
 <h1>6. Results and Performance Evaluation</h1>
 <h2>6.1 Setup</h2>
-<table>
+<table class="span"><caption><span class="tno">Table XII</span><span class="tcap">Experimental setup.</span></caption>
 <thead>
 <tr>
 <th>Item</th>
@@ -1357,7 +1390,7 @@ excerpts).</p>
 <h2>6.2 Experiment A: real routing, and how much any cache policy could gain</h2>
 <p><code>moe_trace</code> recorded 255 decode tokens for each of three prompts: 32,640
 expert uses per prompt. Measured properties:</p>
-<table>
+<table class="span"><caption><span class="tno">Table XIII</span><span class="tcap">Locality and predictability of real OLMoE routing (Experiment A).</span></caption>
 <thead>
 <tr>
 <th>Prompt</th>
@@ -1391,7 +1424,7 @@ expert uses per prompt. Measured properties:</p>
 layers (60–78 % recall). The simulator was fed these traces with expert
 caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 (other prompts in the CSVs):</p>
-<table>
+<table class="span"><caption><span class="tno">Table XIV</span><span class="tcap">Simulated miss ratio by policy and cache size, OLMoE prose prompt (Experiment A).</span></caption>
 <thead>
 <tr>
 <th>Cache size</th>
@@ -1445,7 +1478,7 @@ caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 </tr>
 </tbody>
 </table>
-<p><img alt="Simulated policies" src="fig-sim-prose.png" /></p>
+<figure class="narrow"><img src="fig-sim-prose.png" alt="Simulated policies"><figcaption><span class="fno">Fig. 8.</span> Simulated miss ratio versus cache size on real OLMoE routing (prose prompt).</figcaption></figure>
 <p><strong>Reading:</strong></p>
 <ul>
 <li>An optimal policy would avoid 34–74 % of LRU's misses at 15–50 %
@@ -1477,7 +1510,7 @@ behalf. An earlier version of this table used the replayer's own
 <code>/proc/self/io</code>, which leaves out the daemon's reads and so understated
 traffic for the two daemon variants; on the four daemon-free runs the two
 counters agree to within 0.001 GB/token.</p>
-<table>
+<table class="span"><caption><span class="tno">Table XV</span><span class="tcap">Real-kernel replay of OLMoE routing under a memory limit (Experiment B).</span></caption>
 <thead>
 <tr>
 <th>Budget</th>
@@ -1546,7 +1579,7 @@ counters agree to within 0.001 GB/token.</p>
 </tr>
 </tbody>
 </table>
-<p><img alt="Replay" src="fig-replay.png" /></p>
+<figure class="span"><img src="fig-replay.png" alt="Replay"><figcaption><span class="fno">Fig. 9.</span> Experiment B: replay speed and data read per token for real OLMoE routing under two memory limits.</figcaption></figure>
 <p><strong>Reading:</strong></p>
 <ul>
 <li><strong>Read-around pollution dominates.</strong> With the kernel's default 4 MiB
@@ -1569,7 +1602,7 @@ counters agree to within 0.001 GB/token.</p>
 <h2>6.4 Experiment C: fault-driven vs bulk read bandwidth</h2>
 <p>32 cold expert units (3.8 MB each, three slices) of the real model file
 were read in three ways, 3 seeds each:</p>
-<table>
+<table class="narrow"><caption><span class="tno">Table XVI</span><span class="tcap">Cold expert-unit read bandwidth on the OLMoE file (Experiment C).</span></caption>
 <thead>
 <tr>
 <th>Method</th>
@@ -1600,7 +1633,7 @@ were read in three ways, 3 seeds each:</p>
 </tr>
 </tbody>
 </table>
-<p><img alt="Bandwidth" src="fig-bandwidth.png" /></p>
+<figure class="span"><img src="fig-bandwidth.png" alt="Bandwidth"><figcaption><span class="fno">Fig. 10.</span> Experiment C: delivered bandwidth and read amplification for cold OLMoE expert units.</figcaption></figure>
 <p>Bulk chunked readahead delivers expert bytes <strong>≈ 7× faster</strong> than page
 faults, with no amplification, so kill criterion <strong>K2 does not fire</strong>.
 Chunking matters: single calls are truncated by the kernel to the device
@@ -1611,7 +1644,7 @@ inside the cgroup, starting cold. Decode throughput is mean ± standard
 deviation over the 3 repetitions. SSD traffic and major faults are
 cgroup/device totals divided by all 97 decoded tokens. PSI is the cgroup's
 memory-pressure "some" average over the last 10 s at exit.</p>
-<table>
+<table class="span"><caption><span class="tno">Table XVII</span><span class="tcap">llama.cpp decode under a cgroup memory limit, OLMoE-1B-7B (Experiment D).</span></caption>
 <thead>
 <tr>
 <th>Budget</th>
@@ -1721,7 +1754,7 @@ memory-pressure "some" average over the last 10 s at exit.</p>
 </tr>
 </tbody>
 </table>
-<p><img alt="End to end" src="fig-e2e.png" /></p>
+<figure class="span"><img src="fig-e2e.png" alt="End to end"><figcaption><span class="fno">Fig. 11.</span> Experiment D: llama.cpp decode throughput per configuration under two memory limits (mean ± s.d.).</figcaption></figure>
 <p><strong>Against the same engine serving weights from the page cache (B2):</strong></p>
 <ul>
 <li>PD is <strong>4.0× faster at 1.5 GB</strong> and <strong>3.7× faster at 2.5 GB</strong>.</li>
@@ -1773,7 +1806,7 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
     at 15–50 % capacity, similar to OLMoE.</li>
 <li>
 <p><strong>Bandwidth (C), 13.25 MB units:</strong></p>
-<table>
+<table class="narrow"><caption><span class="tno">Table XVIII</span><span class="tcap">Cold expert-unit read bandwidth on gpt-oss-20b, 13.25 MB units (Experiment C).</span></caption>
 <thead>
 <tr>
 <th>Method</th>
@@ -1809,7 +1842,7 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
 <p><strong>Replay (B), prose trace, 1.27 GB of experts per token:</strong></p>
 </li>
 </ul>
-<table>
+<table class="span"><caption><span class="tno">Table XIX</span><span class="tcap">Real-kernel replay of gpt-oss-20b routing (Experiment B).</span></caption>
 <thead>
 <tr>
 <th>Budget</th>
@@ -1869,7 +1902,7 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
 </tr>
 </tbody>
 </table>
-<p><img alt="gpt-oss replay" src="fig-replay-gptoss.png" /></p>
+<figure class="span"><img src="fig-replay-gptoss.png" alt="gpt-oss replay"><figcaption><span class="fno">Fig. 12.</span> Experiment B on gpt-oss-20b: replay speed and data read per token.</figcaption></figure>
 <p><strong>Reading:</strong></p>
 <ul>
 <li>The best configuration is the same as for OLMoE: read-around off plus
@@ -1886,7 +1919,7 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.</p>
     somewhat on its own with read-around on (1.06× and 1.22×).</li>
 </ul>
 <h2>6.7 Comparison with expected outcomes and with existing methods</h2>
-<table>
+<table class="span"><caption><span class="tno">Table XX</span><span class="tcap">Expected versus measured outcomes.</span></caption>
 <thead>
 <tr>
 <th>Expectation (IDEA_REVIEW, before measuring)</th>
@@ -2008,6 +2041,7 @@ reads. See Section 6.5 for the end-to-end numbers.
 <p>References are numbered in order of first citation. arXiv identifiers
 are given for every preprint; where a peer-reviewed version is known, its
 venue is listed first.</p>
+<div class="refs">
 <p>[1] ggml-org, "llama.cpp: LLM inference in C/C++," source code, commit 970b51c (Oct. 2026); files <code>src/llama-mmap.cpp</code>, <code>src/llama-model-loader.cpp</code>, <code>ggml/src/ggml-cpu/repack.cpp</code>. [Online]. Available: https://github.com/ggml-org/llama.cpp</p>
 <p>[2] ggml-org, "GGUF," file format specification, <code>docs/gguf.md</code> in the ggml repository. [Online]. Available: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md</p>
 <p>[3] The Linux man-pages project, <code>mincore(2)</code>, <code>posix_fadvise(2)</code>, <code>madvise(2)</code>, <code>process_madvise(2)</code>, <code>mlock(2)</code>, <code>cachestat(2)</code>. [Online]. Available: https://man7.org/linux/man-pages/</p>
@@ -2036,4 +2070,5 @@ venue is listed first.</p>
 <p>[26] Y. Song, Z. Mi, H. Xie, and H. Chen, "PowerInfer: Fast large language model serving with a consumer-grade GPU," in <em>Proc. ACM SIGOPS 30th Symp. Operating Systems Principles (SOSP)</em>, 2024, arXiv:2312.12456.</p>
 <p>[27] R. L. Mattson, J. Gecsei, D. R. Slutz, and I. L. Traiger, "Evaluation techniques for storage hierarchies," <em>IBM Syst. J.</em>, vol. 9, no. 2, pp. 78–117, 1970.</p>
 <p>[28] P. M. Fenwick, "A new data structure for cumulative frequency tables," <em>Softw.: Pract. Exper.</em>, vol. 24, no. 3, pp. 327–336, 1994.</p>
-<p>[29] The Linux Kernel Documentation, "PSI — Pressure Stall Information." [Online]. Available: https://docs.kernel.org/accounting/psi.html</p></body></html>
+<p>[29] The Linux Kernel Documentation, "PSI — Pressure Stall Information." [Online]. Available: https://docs.kernel.org/accounting/psi.html</p>
+</div></main></body></html>

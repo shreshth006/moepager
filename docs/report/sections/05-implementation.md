@@ -2,6 +2,8 @@
 
 ## 5.1 Technology stack and structure
 
+Table: Technology stack.
+
 | Layer | Choice | Why |
 |---|---|---|
 | Core, simulator, daemon, CLI | **Rust** (stable), 10 crates, ≈ 8,900 lines | Predictable latency for a daemon; fast enough for simulation sweeps; one language, so the daemon and the simulator share the *same* policy code |
@@ -12,6 +14,8 @@
 | Fixtures, metric parsing, probes | Python (stdlib + pytest), 674 lines | Independent GGUF writer so parser tests aren't self-confirming |
 | Experiments | Bash + cgroup v2 (`systemd-run --user`), no root | Fixed memory budget per run |
 | CI | GitHub Actions: fmt, clippy `-D warnings`, tests, ruff, pytest, demo smoke run | |
+
+Table: Rust crates and their responsibilities.
 
 | Crate | Responsibility |
 |---|---|
@@ -27,6 +31,8 @@
 | `moepagerd` | Daemon: policies `none`, `willneed-all`, `lru-pin`, `v`; sources `sentinel` / `trace:`; ops `linux` / `mock` |
 
 ## 5.2 Functional completeness
+
+Table: Functional completeness.
 
 | Feature | Status |
 |---|---|
@@ -78,19 +84,19 @@ on the real OLMoE model follow.
 ## 5.5 Screenshots (real output on OLMoE-1B-7B)
 
 ![gguf-map](screens/01-gguf-map.png)
-*Figure 2. Expert map from the real GGUF header, with the repack warning for this AVX2 CPU.*
+*Figure: Expert map from the real GGUF header, with the repack warning for this AVX2 CPU.*
 
 ![moe_trace](screens/05-moe-trace.png)
-*Figure 3. Ground-truth routing capture through llama.cpp's eval callback.*
+*Figure: Ground-truth routing capture through llama.cpp's eval callback.*
 
 ![import + analyze](screens/02-import-analyze.png)
-*Figure 4. Importing the routing trace and analyzing it: reuse, predictability, exact LRU curve.*
+*Figure: Importing the routing trace and analyzing it: reuse, predictability, exact LRU curve.*
 
 ![sim](screens/03-sim.png)
-*Figure 5. Policy simulation, including the Belady\* bound.*
+*Figure: Policy simulation, including the Belady\* bound.*
 
 ![phase 7](screens/06-phase7-d.png)
-*Figure 6. Collected end-to-end results (B0S rows are OOM-killed runs), daemon counters, and the shim at work.*
+*Figure: Collected end-to-end results (B0S rows are OOM-killed runs), daemon counters, and the shim at work.*
 
 ![tests](screens/04-tests.png)
-*Figure 7. Test and lint status.*
+*Figure: Test and lint status.*

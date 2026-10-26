@@ -1,19 +1,14 @@
-# moepager
+<header class="paper-title" markdown="1">
+<p class="title">moepager: Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines</p>
+<p class="authors">Shreshth Mishra · Ayush Sinha</p>
+<p class="meta">Code, data and raw results: https://github.com/shreshth006/moepager</p>
+<p class="meta"><em>Formal title:</em> System and Method for Non-Invasive, Expert-Aware Page-Cache Management for Mixture-of-Experts Model Inference on Memory-Constrained Linux Hosts</p>
+</header>
 
-## Expert-Aware Page-Cache Management for Mixture-of-Experts LLM Inference on Memory-Constrained Linux Machines
+<!-- BODY -->
 
-**Formal title:** System and Method for Non-Invasive, Expert-Aware
-Page-Cache Management for Mixture-of-Experts Model Inference on
-Memory-Constrained Linux Hosts
-
-**Repository:** https://github.com/shreshth006/moepager · team fork:
-https://github.com/AyushSinha2210/moepager (branch `ayush`)
-
-# 1. Title, Abstract and Architecture
-
-## 1.1 Abstract
-
-Mixture-of-Experts (MoE) language models activate only a few "expert"
+<div class="abstract" markdown="1">
+<b><i>Abstract</i>—</b>Mixture-of-Experts (MoE) language models activate only a few "expert"
 sub-networks per layer for each token: 8 of 64 in OLMoE-1B-7B, 4 of 32 in
 gpt-oss-20b, 8 of 128 in Qwen3-30B-A3B. That makes them attractive for
 consumer machines, which run them with llama.cpp in `mmap` mode when the
@@ -65,7 +60,10 @@ We also report what did not work: a value-based pinning policy captured
 little of the optimal policy's 34–74 % miss reduction, and completion
 readahead without turning off read-around made performance worse.
 
-## 1.2 System architecture
+<p class="index-terms"><b><i>Index Terms</i>—</b>Mixture of experts, large language models, page cache, readahead, memory management, Linux, cgroups, llama.cpp.</p>
+</div>
+
+# 1. System Architecture
 
 moepager is a **user-space control loop around the Linux page cache**. It
 sits beside an unmodified inference engine, observes the engine only
@@ -74,11 +72,11 @@ interfaces. Figure 1 shows the whole system; the subsections below define
 its structure, components, interfaces, data model, runtime behaviour,
 process and privilege model, and the design decisions behind them.
 
-![moepager architecture](architecture-portrait.png)
+![moepager architecture](architecture.png)
 
-*Figure 1. moepager architecture (source: `docs/report/architecture-portrait.dot`; a landscape version is `architecture.png`).*
+*Figure: moepager architecture (source: `docs/report/architecture.dot`; a portrait version is `architecture-portrait.png`).*
 
-### 1.2.1 Architectural style
+## 1.1 Architectural style
 
 - **Layered, with ports and adapters.** Policy code is pure: it consumes
     observations and emits `Action` values, and never calls the kernel. All
@@ -114,7 +112,9 @@ below it):
                 cgroup v2, PSI
 ```
 
-### 1.2.2 Components and responsibilities
+## 1.2 Components and responsibilities
+
+Table: Components of moepager and their responsibilities.
 
 | Component | Language / size | Responsibility | Needs privilege |
 |---|---|---|---|
@@ -133,7 +133,7 @@ below it):
 | `python/moepager_tools` | Python | Result collection, report figures | no |
 | llama.cpp [1] | external, unmodified | The inference engine; maps the model with `mmap` | no |
 
-### 1.2.3 Interfaces
+## 1.3 Interfaces
 
 The boundaries between layers are four Rust traits and one value type:
 
@@ -180,7 +180,9 @@ pub trait Controller {
     control files [4]; the `.mpt` trace format
     (`docs/TRACE_FORMAT.md`); the expert map as JSON (`map.json`).
 
-### 1.2.4 Data model
+## 1.4 Data model
+
+Table: Data model.
 
 | Entity | Fields | Notes |
 |---|---|---|
@@ -194,7 +196,7 @@ pub trait Controller {
 | `.mpt` file | magic `MPTRACE\0`, version, record kind, JSON header (model, observation regime, units), fixed-size records | expert records (16 B) or page records (24 B) |
 | `OnlineStats` | decayed counts and exposures per unit, layer-transition rows, layer time | the daemon's only state besides the pinned set |
 
-### 1.2.5 Runtime data flow
+## 1.5 Runtime data flow
 
 For each decoded token, with the recommended configuration (engine with
 `-nr` and the shim; daemon with `--policy v --budget-mb 0`):
@@ -224,7 +226,9 @@ Offline, `mp-gguf` produces the map used in steps 2–5. For evaluation,
 `moe_trace` replaces steps 2–3 with exact router output, and `mp-sim`
 replaces steps 1, 6 and 8 with a model of the cache and the I/O device.
 
-### 1.2.6 Process, privilege and memory view
+## 1.6 Process, privilege and memory view
+
+Table: Processes, model mappings and privileges at run time.
 
 | Process | Runs | Maps the model | Privilege |
 |---|---|---|---|
@@ -247,7 +251,9 @@ replaces steps 1, 6 and 8 with a model of the cache and the I/O device.
     plain kernel behaviour; every action is a hint, and pins are released
     when the daemon's mapping is closed.
 
-### 1.2.7 Key design decisions
+## 1.7 Key design decisions
+
+Table: Architecture decision records.
 
 | ADR | Decision | Reason |
 |---|---|---|
@@ -275,6 +281,8 @@ the router picks a few experts per layer (top-k), so only a small fraction
 of the parameters is used per token. In the three models studied here,
 OLMoE [8], gpt-oss [9] and Qwen3 [10] (values read from
 the real model file headers [11]):
+
+Table: The three MoE models studied (values from the GGUF headers).
 
 | Model | File (quantisation) | Size | Layers × experts | top-k | Expert share of file |
 |---|---|---|---|---|---|
@@ -397,6 +405,8 @@ Every algorithm below corresponds to code in the repository; the crate is
 named in each heading.
 
 ## 4.1 Problem model and notation
+
+Table: Notation.
 
 | Symbol | Meaning |
 |---|---|
@@ -720,6 +730,8 @@ experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
 
 **Experiments.**
 
+Table: Experiments A–D.
+
 | | Question | Independent variables | Measured |
 |---|---|---|---|
 | **A** | How local and predictable is real routing; how much could any policy gain? | prompt domain (chat, code, prose); cache size 15–70 % of expert bytes; policy | reuse, concentration, next-layer recall; miss ratio per policy |
@@ -763,6 +775,8 @@ experiment (ADR 0004) with criteria fixed before measuring (IDEA_REVIEW
     discarded and repeated.
 
 ## 4.9 Metric definitions
+
+Table: Metric definitions.
 
 | Metric | Definition | Source |
 |---|---|---|
@@ -821,6 +835,8 @@ extrapolated.
 
 ## 5.1 Technology stack and structure
 
+Table: Technology stack.
+
 | Layer | Choice | Why |
 |---|---|---|
 | Core, simulator, daemon, CLI | **Rust** (stable), 10 crates, ≈ 8,900 lines | Predictable latency for a daemon; fast enough for simulation sweeps; one language, so the daemon and the simulator share the *same* policy code |
@@ -831,6 +847,8 @@ extrapolated.
 | Fixtures, metric parsing, probes | Python (stdlib + pytest), 674 lines | Independent GGUF writer so parser tests aren't self-confirming |
 | Experiments | Bash + cgroup v2 (`systemd-run --user`), no root | Fixed memory budget per run |
 | CI | GitHub Actions: fmt, clippy `-D warnings`, tests, ruff, pytest, demo smoke run | |
+
+Table: Rust crates and their responsibilities.
 
 | Crate | Responsibility |
 |---|---|
@@ -846,6 +864,8 @@ extrapolated.
 | `moepagerd` | Daemon: policies `none`, `willneed-all`, `lru-pin`, `v`; sources `sentinel` / `trace:`; ops `linux` / `mock` |
 
 ## 5.2 Functional completeness
+
+Table: Functional completeness.
 
 | Feature | Status |
 |---|---|
@@ -897,27 +917,29 @@ on the real OLMoE model follow.
 ## 5.5 Screenshots (real output on OLMoE-1B-7B)
 
 ![gguf-map](screens/01-gguf-map.png)
-*Figure 2. Expert map from the real GGUF header, with the repack warning for this AVX2 CPU.*
+*Figure: Expert map from the real GGUF header, with the repack warning for this AVX2 CPU.*
 
 ![moe_trace](screens/05-moe-trace.png)
-*Figure 3. Ground-truth routing capture through llama.cpp's eval callback.*
+*Figure: Ground-truth routing capture through llama.cpp's eval callback.*
 
 ![import + analyze](screens/02-import-analyze.png)
-*Figure 4. Importing the routing trace and analyzing it: reuse, predictability, exact LRU curve.*
+*Figure: Importing the routing trace and analyzing it: reuse, predictability, exact LRU curve.*
 
 ![sim](screens/03-sim.png)
-*Figure 5. Policy simulation, including the Belady\* bound.*
+*Figure: Policy simulation, including the Belady\* bound.*
 
 ![phase 7](screens/06-phase7-d.png)
-*Figure 6. Collected end-to-end results (B0S rows are OOM-killed runs), daemon counters, and the shim at work.*
+*Figure: Collected end-to-end results (B0S rows are OOM-killed runs), daemon counters, and the shim at work.*
 
 ![tests](screens/04-tests.png)
-*Figure 7. Test and lint status.*
+*Figure: Test and lint status.*
 
 
 # 6. Results and Performance Evaluation
 
 ## 6.1 Setup
+
+Table: Experimental setup.
 
 | Item | Value |
 |---|---|
@@ -938,6 +960,8 @@ excerpts).
 `moe_trace` recorded 255 decode tokens for each of three prompts: 32,640
 expert uses per prompt. Measured properties:
 
+Table: Locality and predictability of real OLMoE routing (Experiment A).
+
 | Prompt | Same expert reused on the next token | Top-10 % experts' share of uses | Next-layer recall: transitions / popularity / previous token |
 |---|---|---|---|
 | chat | 41 % | 30 % | 0.60 / 0.36 / 0.42 |
@@ -949,6 +973,8 @@ layers (60–78 % recall). The simulator was fed these traces with expert
 caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 (other prompts in the CSVs):
 
+Table: Simulated miss ratio by policy and cache size, OLMoE prose prompt (Experiment A).
+
 | Cache size | LRU | LFU | V(e), miss-only | Belady\* (optimal) | Belady\* saves vs LRU |
 |---|---|---|---|---|---|
 | 15 % | 0.552 | 0.500 | 0.672 | 0.345 | 38 % |
@@ -958,6 +984,8 @@ caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 | 70 % | 0.004 | 0.004 | 0.004 | 0.004 | 4 % |
 
 ![Simulated policies](fig-sim-prose.png)
+
+*Figure: Simulated miss ratio versus cache size on real OLMoE routing (prose prompt).*
 
 **Reading:**
 
@@ -996,6 +1024,8 @@ behalf. An earlier version of this table used the replayer's own
 traffic for the two daemon variants; on the four daemon-free runs the two
 counters agree to within 0.001 GB/token.
 
+Table: Real-kernel replay of OLMoE routing under a memory limit (Experiment B).
+
 | Budget | Variant | tokens/s | Data read / token (incl. daemon) | Major faults / token |
 |---|---|---|---|---|
 | 1.5 GB | kernel default | 0.79 | **1.80 GB** | 956 |
@@ -1008,6 +1038,8 @@ counters agree to within 0.001 GB/token.
 | 2.5 GB | read-around off + moepagerd | 2.48 | 0.15 GB | 12,641 |
 
 ![Replay](fig-replay.png)
+
+*Figure: Experiment B: replay speed and data read per token for real OLMoE routing under two memory limits.*
 
 **Reading:**
 
@@ -1033,6 +1065,8 @@ counters agree to within 0.001 GB/token.
 32 cold expert units (3.8 MB each, three slices) of the real model file
 were read in three ways, 3 seeds each:
 
+Table: Cold expert-unit read bandwidth on the OLMoE file (Experiment C).
+
 | Method | GB/s delivered | SSD bytes read ÷ needed |
 |---|---|---|
 | mmap page faults (8 threads) | 0.15–0.24 | 4.8× |
@@ -1041,6 +1075,8 @@ were read in three ways, 3 seeds each:
 | pread, 1 MiB blocks | 0.44–0.56 | 1.24× |
 
 ![Bandwidth](fig-bandwidth.png)
+
+*Figure: Experiment C: delivered bandwidth and read amplification for cold OLMoE expert units.*
 
 Bulk chunked readahead delivers expert bytes **≈ 7× faster** than page
 faults, with no amplification, so kill criterion **K2 does not fire**.
@@ -1054,6 +1090,8 @@ inside the cgroup, starting cold. Decode throughput is mean ± standard
 deviation over the 3 repetitions. SSD traffic and major faults are
 cgroup/device totals divided by all 97 decoded tokens. PSI is the cgroup's
 memory-pressure "some" average over the last 10 s at exit.
+
+Table: llama.cpp decode under a cgroup memory limit, OLMoE-1B-7B (Experiment D).
 
 | Budget | Configuration | tokens/s | SSD GB / token | Major faults / token | Memory PSI (some, avg10) |
 |---|---|---|---|---|---|
@@ -1071,6 +1109,8 @@ memory-pressure "some" average over the last 10 s at exit.
 | 2.5 GB | **PD B2 + read-around off + moepagerd** | **3.21 ± 0.65** | 0.17 | 8,161 | 2.5 % |
 
 ![End to end](fig-e2e.png)
+
+*Figure: Experiment D: llama.cpp decode throughput per configuration under two memory limits (mean ± s.d.).*
 
 **Against the same engine serving weights from the page cache (B2):**
 
@@ -1128,6 +1168,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
     at 15–50 % capacity, similar to OLMoE.
 - **Bandwidth (C), 13.25 MB units:**
 
+    Table: Cold expert-unit read bandwidth on gpt-oss-20b, 13.25 MB units (Experiment C).
+
     | Method | GB/s | Amplification |
     |---|---|---|
     | mmap faults | 0.14–0.44 | ≈ 2.5× |
@@ -1136,6 +1178,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
     | pread | 0.31–0.65 | — |
 
 - **Replay (B), prose trace, 1.27 GB of experts per token:**
+
+Table: Real-kernel replay of gpt-oss-20b routing (Experiment B).
 
 | Budget | Variant | tokens/s | Data read / token (incl. daemon) |
 |---|---|---|---|
@@ -1149,6 +1193,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
 | 6 GB | **read-around off + moepagerd** | **5.47** | **0.11 GB** |
 
 ![gpt-oss replay](fig-replay-gptoss.png)
+
+*Figure: Experiment B on gpt-oss-20b: replay speed and data read per token.*
 
 **Reading:**
 
@@ -1164,6 +1210,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
     somewhat on its own with read-around on (1.06× and 1.22×).
 
 ## 6.7 Comparison with expected outcomes and with existing methods
+
+Table: Expected versus measured outcomes.
 
 | Expectation (IDEA_REVIEW, before measuring) | Outcome |
 |---|---|
@@ -1272,6 +1320,8 @@ References are numbered in order of first citation. arXiv identifiers
 are given for every preprint; where a peer-reviewed version is known, its
 venue is listed first.
 
+<div class="refs" markdown="1">
+
 [1] ggml-org, "llama.cpp: LLM inference in C/C++," source code, commit 970b51c (Oct. 2026); files `src/llama-mmap.cpp`, `src/llama-model-loader.cpp`, `ggml/src/ggml-cpu/repack.cpp`. [Online]. Available: https://github.com/ggml-org/llama.cpp
 
 [2] ggml-org, "GGUF," file format specification, `docs/gguf.md` in the ggml repository. [Online]. Available: https://github.com/ggml-org/ggml/blob/master/docs/gguf.md
@@ -1329,3 +1379,5 @@ venue is listed first.
 [28] P. M. Fenwick, "A new data structure for cumulative frequency tables," *Softw.: Pract. Exper.*, vol. 24, no. 3, pp. 327–336, 1994.
 
 [29] The Linux Kernel Documentation, "PSI — Pressure Stall Information." [Online]. Available: https://docs.kernel.org/accounting/psi.html
+
+</div>

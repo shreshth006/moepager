@@ -10,6 +10,8 @@ of the parameters is used per token. In the three models studied here,
 OLMoE [@olmoe], gpt-oss [@gptoss] and Qwen3 [@qwen3] (values read from
 the real model file headers [@hfmodels]):
 
+Table: The three MoE models studied (values from the GGUF headers).
+
 | Model | File (quantisation) | Size | Layers × experts | top-k | Expert share of file |
 |---|---|---|---|---|---|
 | OLMoE-1B-7B-0924 | Q4_K_M | 4.21 GB | 16 × 64 | 8 | 92.6 % |

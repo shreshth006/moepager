@@ -2,6 +2,8 @@
 
 ## 6.1 Setup
 
+Table: Experimental setup.
+
 | Item | Value |
 |---|---|
 | Machine | Laptop, Intel i5-12450H (8 cores / 12 threads, AVX2), 15 GiB RAM + 8 GiB zram swap, desktop session running |
@@ -21,6 +23,8 @@ excerpts).
 `moe_trace` recorded 255 decode tokens for each of three prompts: 32,640
 expert uses per prompt. Measured properties:
 
+Table: Locality and predictability of real OLMoE routing (Experiment A).
+
 | Prompt | Same expert reused on the next token | Top-10 % experts' share of uses | Next-layer recall: transitions / popularity / previous token |
 |---|---|---|---|
 | chat | 41 % | 30 % | 0.60 / 0.36 / 0.42 |
@@ -32,6 +36,8 @@ layers (60–78 % recall). The simulator was fed these traces with expert
 caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 (other prompts in the CSVs):
 
+Table: Simulated miss ratio by policy and cache size, OLMoE prose prompt (Experiment A).
+
 | Cache size | LRU | LFU | V(e), miss-only | Belady\* (optimal) | Belady\* saves vs LRU |
 |---|---|---|---|---|---|
 | 15 % | 0.552 | 0.500 | 0.672 | 0.345 | 38 % |
@@ -41,6 +47,8 @@ caches of 15–70 % of the expert bytes. Miss ratios for the prose prompt
 | 70 % | 0.004 | 0.004 | 0.004 | 0.004 | 4 % |
 
 ![Simulated policies](fig-sim-prose.png)
+
+*Figure: Simulated miss ratio versus cache size on real OLMoE routing (prose prompt).*
 
 **Reading:**
 - An optimal policy would avoid 34–74 % of LRU's misses at 15–50 %
@@ -78,6 +86,8 @@ behalf. An earlier version of this table used the replayer's own
 traffic for the two daemon variants; on the four daemon-free runs the two
 counters agree to within 0.001 GB/token.
 
+Table: Real-kernel replay of OLMoE routing under a memory limit (Experiment B).
+
 | Budget | Variant | tokens/s | Data read / token (incl. daemon) | Major faults / token |
 |---|---|---|---|---|
 | 1.5 GB | kernel default | 0.79 | **1.80 GB** | 956 |
@@ -90,6 +100,8 @@ counters agree to within 0.001 GB/token.
 | 2.5 GB | read-around off + moepagerd | 2.48 | 0.15 GB | 12,641 |
 
 ![Replay](fig-replay.png)
+
+*Figure: Experiment B: replay speed and data read per token for real OLMoE routing under two memory limits.*
 
 **Reading:**
 - **Read-around pollution dominates.** With the kernel's default 4 MiB
@@ -114,6 +126,8 @@ counters agree to within 0.001 GB/token.
 32 cold expert units (3.8 MB each, three slices) of the real model file
 were read in three ways, 3 seeds each:
 
+Table: Cold expert-unit read bandwidth on the OLMoE file (Experiment C).
+
 | Method | GB/s delivered | SSD bytes read ÷ needed |
 |---|---|---|
 | mmap page faults (8 threads) | 0.15–0.24 | 4.8× |
@@ -122,6 +136,8 @@ were read in three ways, 3 seeds each:
 | pread, 1 MiB blocks | 0.44–0.56 | 1.24× |
 
 ![Bandwidth](fig-bandwidth.png)
+
+*Figure: Experiment C: delivered bandwidth and read amplification for cold OLMoE expert units.*
 
 Bulk chunked readahead delivers expert bytes **≈ 7× faster** than page
 faults, with no amplification, so kill criterion **K2 does not fire**.
@@ -135,6 +151,8 @@ inside the cgroup, starting cold. Decode throughput is mean ± standard
 deviation over the 3 repetitions. SSD traffic and major faults are
 cgroup/device totals divided by all 97 decoded tokens. PSI is the cgroup's
 memory-pressure "some" average over the last 10 s at exit.
+
+Table: llama.cpp decode under a cgroup memory limit, OLMoE-1B-7B (Experiment D).
 
 | Budget | Configuration | tokens/s | SSD GB / token | Major faults / token | Memory PSI (some, avg10) |
 |---|---|---|---|---|---|
@@ -152,6 +170,8 @@ memory-pressure "some" average over the last 10 s at exit.
 | 2.5 GB | **PD B2 + read-around off + moepagerd** | **3.21 ± 0.65** | 0.17 | 8,161 | 2.5 % |
 
 ![End to end](fig-e2e.png)
+
+*Figure: Experiment D: llama.cpp decode throughput per configuration under two memory limits (mean ± s.d.).*
 
 **Against the same engine serving weights from the page cache (B2):**
 - PD is **4.0× faster at 1.5 GB** and **3.7× faster at 2.5 GB**.
@@ -206,6 +226,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
   at 15–50 % capacity, similar to OLMoE.
 - **Bandwidth (C), 13.25 MB units:**
 
+  Table: Cold expert-unit read bandwidth on gpt-oss-20b, 13.25 MB units (Experiment C).
+
   | Method | GB/s | Amplification |
   |---|---|---|
   | mmap faults | 0.14–0.44 | ≈ 2.5× |
@@ -214,6 +236,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
   | pread | 0.31–0.65 | — |
 
 - **Replay (B), prose trace, 1.27 GB of experts per token:**
+
+Table: Real-kernel replay of gpt-oss-20b routing (Experiment B).
 
 | Budget | Variant | tokens/s | Data read / token (incl. daemon) |
 |---|---|---|---|
@@ -228,6 +252,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
 
 ![gpt-oss replay](fig-replay-gptoss.png)
 
+*Figure: Experiment B on gpt-oss-20b: replay speed and data read per token.*
+
 **Reading:**
 - The best configuration is the same as for OLMoE: read-around off plus
   completion readahead, **1.6× and 2.0× faster** than the kernel default,
@@ -241,6 +267,8 @@ moepager avoids, but there are no end-to-end gpt-oss numbers.
   somewhat on its own with read-around on (1.06× and 1.22×).
 
 ## 6.7 Comparison with expected outcomes and with existing methods
+
+Table: Expected versus measured outcomes.
 
 | Expectation (IDEA_REVIEW, before measuring) | Outcome |
 |---|---|
